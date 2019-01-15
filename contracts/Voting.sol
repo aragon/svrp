@@ -18,7 +18,7 @@ contract Voting is IForwarder, AragonApp {
     using SafeMath64 for uint64;
 
     bytes32 public constant CREATE_VOTES_ROLE = keccak256("CREATE_VOTES_ROLE");
-    bytes32 public constant SUBMIT_VOTES_ROLE = keccak256("SUBMIT_VOTES_ROLE");
+    bytes32 public constant SUBMIT_BATCH_ROLE = keccak256("SUBMIT_BATCH_ROLE");
     bytes32 public constant MODIFY_SUPPORT_ROLE = keccak256("MODIFY_SUPPORT_ROLE");
     bytes32 public constant MODIFY_QUORUM_ROLE = keccak256("MODIFY_QUORUM_ROLE");
 
