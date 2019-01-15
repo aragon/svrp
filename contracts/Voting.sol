@@ -4,6 +4,7 @@
 
 pragma solidity 0.4.24;
 
+import "@aragon/os/contracts/lib/token/ERC20.sol";
 import "@aragon/os/contracts/apps/AragonApp.sol";
 import "@aragon/os/contracts/common/IForwarder.sol";
 
@@ -24,8 +25,7 @@ contract Voting is IForwarder, AragonApp {
 
     uint64 public constant PCT_BASE = 10 ** 18; // 0% = 0; 1% = 10^16; 100% = 10^18
 
-    uint256 public constant BATCH_SIZE = 10;
-    uint256 public constant SLASHING_COST = 1000 * 10 ** 18;
+    uint256 public constant SLASHING_COST = 1000;
     uint256 public constant CHALLENGE_WINDOW = 7 days;
 
     string private constant ERROR_NO_VOTE = "VOTING_NO_VOTE";
@@ -40,7 +40,7 @@ contract Voting is IForwarder, AragonApp {
     string private constant ERROR_CAN_NOT_FORWARD = "VOTING_CAN_NOT_FORWARD";
     string private constant ERROR_NO_VOTING_POWER = "VOTING_NO_VOTING_POWER";
     string private constant ERROR_CHALLENGE_REJECTED = "VOTING_CHALLENGE_REJECTED";
-    string private constant ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD = "VOTING_OUT_OF_BATCH_CHALLENGE_PERIOD";
+    string private constant ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD = "VOTING_OUT_OF_CHALLENGE_PERIOD";
 
     struct Vote {
         bool executed;
@@ -61,22 +61,25 @@ contract Voting is IForwarder, AragonApp {
         uint256 id;
         uint256 yea;
         uint256 nay;
+        uint256 size;
         bytes32 proofHash;
         uint256 timestamp;
     }
 
     MiniMeToken public token;
+    ERC20 public collateralToken;
     uint64 public supportRequiredPct;
     uint64 public minAcceptQuorumPct;
     uint64 public voteTime;
+    uint256 public slashingCost;
 
     // We are mimicing an array, we use a mapping instead to make app upgrade more graceful
     mapping (uint256 => Vote) internal votes;
     uint256 public votesLength;
 
     event StartVote(uint256 indexed voteId, address indexed creator, string metadata);
-    event SubmitBatch(uint256 indexed voteId, uint256 indexed batchId, bytes32 indexed proofHash, uint256 yea, uint256 nay);
-    event AcceptChallenge(uint256 indexed voteId, uint256 indexed batchId, address indexed sender, bytes32 proofHash);
+    event SubmitBatch(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 yea, uint256 nay);
+    event AcceptChallenge(uint256 indexed voteId, uint256 indexed batchId, address indexed sender, bytes proof);
     event ExecuteVote(uint256 indexed voteId);
     event ChangeSupportRequired(uint64 supportRequiredPct);
     event ChangeMinQuorum(uint64 minAcceptQuorumPct);
@@ -100,6 +103,7 @@ contract Voting is IForwarder, AragonApp {
     */
     function initialize(
         MiniMeToken _token,
+        ERC20 _collateralToken,
         uint64 _supportRequiredPct,
         uint64 _minAcceptQuorumPct,
         uint64 _voteTime
@@ -113,9 +117,11 @@ contract Voting is IForwarder, AragonApp {
         require(_supportRequiredPct < PCT_BASE, ERROR_INIT_SUPPORT_TOO_BIG);
 
         token = _token;
+        collateralToken = _collateralToken;
         supportRequiredPct = _supportRequiredPct;
         minAcceptQuorumPct = _minAcceptQuorumPct;
         voteTime = _voteTime;
+        slashingCost = SLASHING_COST.mul(10 ** 18); // TODO: we are assuming the collateral token has 18 decimals
     }
 
     /**
@@ -160,28 +166,29 @@ contract Voting is IForwarder, AragonApp {
     /**
     * @notice Submit new batch of casted votes for a voteId
     */
-    function submitBatch(uint256 _voteId, uint256 _yeas, uint256 _nays, bytes _proof)
+    function submitBatch(uint256 _voteId, uint256 _size, uint256 _yeas, uint256 _nays, bytes _proof)
         external
-        auth(SUBMIT_VOTES_ROLE)
+        auth(SUBMIT_BATCH_ROLE)
         voteExists(_voteId)
     {
         require(canSubmit(_voteId), ERROR_CAN_NOT_SUBMIT_BATCH);
-        _submitBatch(_voteId, _yeas, _nays, _proof);
+        _submitBatch(_voteId, _size, _yeas, _nays, _proof);
     }
 
     function challenge(uint256 _voteId, uint256 _batchId, bytes _proof, bool _success) external batchExists(_voteId, _batchId) {
         Vote storage vote_ = votes[_voteId];
         Batch storage batch_ = vote_.batches[_batchId];
-        require(batch_.timestamp + CHALLENGE_WINDOW >= now, ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+        require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
 
         // TODO: implement RLP verification
+        // use batch size for verification
         require(_success, ERROR_CHALLENGE_REJECTED);
         batch_.valid = false;
         vote_.yea = vote_.yea.sub(batch_.yea);
         vote_.nay = vote_.nay.sub(batch_.nay);
-        emit AcceptChallenge(_voteId, _batchId, msg.sender, keccak256(abi.encodePacked(_proof)));
+        emit AcceptChallenge(_voteId, _batchId, msg.sender, _proof);
 
-        require(token.transfer(msg.sender, SLASHING_COST));
+        require(collateralToken.transfer(msg.sender, slashingCost));
     }
 
     /**
@@ -217,7 +224,7 @@ contract Voting is IForwarder, AragonApp {
     function canSubmit(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
         bool isOpen = _isVoteOpen(vote_);
-        bool hasEnoughBalanceToPayChallenges = token.balanceOf(this) >= SLASHING_COST.mul(vote_.batchesLength.add(1));
+        bool hasEnoughBalanceToPayChallenges = collateralToken.balanceOf(this) >= slashingCost.mul(vote_.batchesLength.add(1));
         return isOpen && hasEnoughBalanceToPayChallenges;
     }
 
@@ -230,7 +237,7 @@ contract Voting is IForwarder, AragonApp {
 
         // Has challenge period ended?
         Batch storage batch_ = vote_.batches[vote_.batchesLength.sub(1)];
-        if (batch_.timestamp + CHALLENGE_WINDOW >= now) {
+        if (_withinChallengeWindow(batch_)) {
             return false;
         }
 
@@ -292,19 +299,19 @@ contract Voting is IForwarder, AragonApp {
         view
         batchExists(_voteId, _batchId)
         returns (
-            uint256 id,
             bool valid,
             uint256 yea,
             uint256 nay,
+            uint256 size,
             uint256 timestamp,
             bytes32 proofHash
         )
     {
         Vote storage vote_ = votes[_voteId];
         Batch storage batch_ = vote_.batches[_batchId];
-        id = batch_.id;
         yea = batch_.yea;
         nay = batch_.nay;
+        size = batch_.size;
         valid = batch_.valid;
         proofHash = batch_.proofHash;
         timestamp = batch_.timestamp;
@@ -326,23 +333,24 @@ contract Voting is IForwarder, AragonApp {
         emit StartVote(voteId, msg.sender, _metadata);
     }
 
-    function _submitBatch(uint256 _voteId, uint256 _yea, uint256 _nay, bytes _proof) internal {
+    function _submitBatch(uint256 _voteId, uint256 _size, uint256 _yea, uint256 _nay, bytes _proof) internal {
         Vote storage vote_ = votes[_voteId];
         uint256 _batchId = vote_.batchesLength;
-        bytes32 _proofHash = keccak256(abi.encodePacked(_proof));
+        bytes32 _proofHash = keccak256(_proof);
 
         Batch storage batch_ = vote_.batches[vote_.batchesLength];
         batch_.id = _batchId;
         batch_.valid = true;
         batch_.yea = _yea;
         batch_.nay = _nay;
+        batch_.size = _size;
         batch_.proofHash = _proofHash;
         batch_.timestamp = block.timestamp;
         vote_.yea = vote_.yea.add(_yea);
         vote_.nay = vote_.nay.add(_nay);
         vote_.batchesLength = vote_.batchesLength.add(1);
 
-        emit SubmitBatch(_voteId, _batchId, _proofHash, _yea, _nay);
+        emit SubmitBatch(_voteId, _batchId, _proof, _yea, _nay);
     }
 
     function _executeVote(uint256 _voteId) internal {
@@ -370,6 +378,10 @@ contract Voting is IForwarder, AragonApp {
 
         uint256 computedPct = _value.mul(PCT_BASE) / _total;
         return computedPct > _pct;
+    }
+
+    function _withinChallengeWindow(Batch storage batch_) internal view returns (bool) {
+        return batch_.timestamp + CHALLENGE_WINDOW >= now;
     }
 
     function _existsVote(uint256 _voteId) internal view returns (bool) {
