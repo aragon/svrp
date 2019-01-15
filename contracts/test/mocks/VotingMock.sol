@@ -8,11 +8,8 @@ contract VotingMock is Voting {
      * https://github.com/trufflesuite/truffle/issues/569
      * https://github.com/trufflesuite/truffle/issues/737
      */
-    function newVoteExt(bytes _executionScript, string _metadata, bool _castVote, bool _executesIfDecided)
-        external
-        returns (uint256 voteId)
-    {
-        voteId = _newVote(_executionScript, _metadata, _castVote, _executesIfDecided);
+    function newVoteExt(bytes _executionScript, string _metadata) external returns (uint256 voteId) {
+        voteId = _newVote(_executionScript, _metadata);
         emit StartVote(voteId, msg.sender, _metadata);
     }
 

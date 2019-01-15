@@ -18,23 +18,29 @@ contract Voting is IForwarder, AragonApp {
     using SafeMath64 for uint64;
 
     bytes32 public constant CREATE_VOTES_ROLE = keccak256("CREATE_VOTES_ROLE");
+    bytes32 public constant SUBMIT_VOTES_ROLE = keccak256("SUBMIT_VOTES_ROLE");
     bytes32 public constant MODIFY_SUPPORT_ROLE = keccak256("MODIFY_SUPPORT_ROLE");
     bytes32 public constant MODIFY_QUORUM_ROLE = keccak256("MODIFY_QUORUM_ROLE");
 
     uint64 public constant PCT_BASE = 10 ** 18; // 0% = 0; 1% = 10^16; 100% = 10^18
 
+    uint256 public constant BATCH_SIZE = 10;
+    uint256 public constant SLASHING_COST = 1000 * 10 ** 18;
+    uint256 public constant CHALLENGE_WINDOW = 7 days;
+
     string private constant ERROR_NO_VOTE = "VOTING_NO_VOTE";
+    string private constant ERROR_NO_BATCH = "VOTING_NO_BATCH";
     string private constant ERROR_INIT_PCTS = "VOTING_INIT_PCTS";
     string private constant ERROR_CHANGE_SUPPORT_PCTS = "VOTING_CHANGE_SUPPORT_PCTS";
     string private constant ERROR_CHANGE_QUORUM_PCTS = "VOTING_CHANGE_QUORUM_PCTS";
     string private constant ERROR_INIT_SUPPORT_TOO_BIG = "VOTING_INIT_SUPPORT_TOO_BIG";
     string private constant ERROR_CHANGE_SUPPORT_TOO_BIG = "VOTING_CHANGE_SUPP_TOO_BIG";
-    string private constant ERROR_CAN_NOT_VOTE = "VOTING_CAN_NOT_VOTE";
+    string private constant ERROR_CAN_NOT_SUBMIT_BATCH = "VOTING_CAN_NOT_SUBMIT_BATCH";
     string private constant ERROR_CAN_NOT_EXECUTE = "VOTING_CAN_NOT_EXECUTE";
     string private constant ERROR_CAN_NOT_FORWARD = "VOTING_CAN_NOT_FORWARD";
     string private constant ERROR_NO_VOTING_POWER = "VOTING_NO_VOTING_POWER";
-
-    enum VoterState { Absent, Yea, Nay }
+    string private constant ERROR_CHALLENGE_REJECTED = "VOTING_CHALLENGE_REJECTED";
+    string private constant ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD = "VOTING_OUT_OF_BATCH_CHALLENGE_PERIOD";
 
     struct Vote {
         bool executed;
@@ -46,7 +52,17 @@ contract Voting is IForwarder, AragonApp {
         uint256 nay;
         uint256 votingPower;
         bytes executionScript;
-        mapping (address => VoterState) voters;
+        mapping (uint256 => Batch) batches;
+        uint256 batchesLength;
+    }
+
+    struct Batch {
+        bool valid;
+        uint256 id;
+        uint256 yea;
+        uint256 nay;
+        bytes32 proofHash;
+        uint256 timestamp;
     }
 
     MiniMeToken public token;
@@ -59,13 +75,19 @@ contract Voting is IForwarder, AragonApp {
     uint256 public votesLength;
 
     event StartVote(uint256 indexed voteId, address indexed creator, string metadata);
-    event CastVote(uint256 indexed voteId, address indexed voter, bool supports, uint256 stake);
+    event SubmitBatch(uint256 indexed voteId, uint256 indexed batchId, bytes32 indexed proofHash, uint256 yea, uint256 nay);
+    event AcceptChallenge(uint256 indexed voteId, uint256 indexed batchId, address indexed sender, bytes32 proofHash);
     event ExecuteVote(uint256 indexed voteId);
     event ChangeSupportRequired(uint64 supportRequiredPct);
     event ChangeMinQuorum(uint64 minAcceptQuorumPct);
 
     modifier voteExists(uint256 _voteId) {
-        require(_voteId < votesLength, ERROR_NO_VOTE);
+        require(_existsVote(_voteId), ERROR_NO_VOTE);
+        _;
+    }
+
+    modifier batchExists(uint256 _voteId, uint256 _batchId) {
+        require(_existsBatch(_voteId, _batchId), ERROR_NO_BATCH);
         _;
     }
 
@@ -132,36 +154,34 @@ contract Voting is IForwarder, AragonApp {
     * @return voteId Id for newly created vote
     */
     function newVote(bytes _executionScript, string _metadata) external auth(CREATE_VOTES_ROLE) returns (uint256 voteId) {
-        return _newVote(_executionScript, _metadata, true, true);
+        return _newVote(_executionScript, _metadata);
     }
 
     /**
-    * @notice Create a new vote about "`_metadata`"
-    * @param _executionScript EVM script to be executed on approval
-    * @param _metadata Vote metadata
-    * @param _castVote Whether to also cast newly created vote
-    * @param _executesIfDecided Whether to also immediately execute newly created vote if decided
-    * @return voteId id for newly created vote
+    * @notice Submit new batch of casted votes for a voteId
     */
-    function newVote(bytes _executionScript, string _metadata, bool _castVote, bool _executesIfDecided)
+    function submitBatch(uint256 _voteId, uint256 _yeas, uint256 _nays, bytes _proof)
         external
-        auth(CREATE_VOTES_ROLE)
-        returns (uint256 voteId)
+        auth(SUBMIT_VOTES_ROLE)
+        voteExists(_voteId)
     {
-        return _newVote(_executionScript, _metadata, _castVote, _executesIfDecided);
+        require(canSubmit(_voteId), ERROR_CAN_NOT_SUBMIT_BATCH);
+        _submitBatch(_voteId, _yeas, _nays, _proof);
     }
 
-    /**
-    * @notice Vote `_supports ? 'yes' : 'no'` in vote #`_voteId`
-    * @dev Initialization check is implicitly provided by `voteExists()` as new votes can only be
-    *      created via `newVote(),` which requires initialization
-    * @param _voteId Id for vote
-    * @param _supports Whether voter supports the vote
-    * @param _executesIfDecided Whether the vote should execute its action if it becomes decided
-    */
-    function vote(uint256 _voteId, bool _supports, bool _executesIfDecided) external voteExists(_voteId) {
-        require(canVote(_voteId, msg.sender), ERROR_CAN_NOT_VOTE);
-        _vote(_voteId, _supports, msg.sender, _executesIfDecided);
+    function challenge(uint256 _voteId, uint256 _batchId, bytes _proof, bool _success) external batchExists(_voteId, _batchId) {
+        Vote storage vote_ = votes[_voteId];
+        Batch storage batch_ = vote_.batches[_batchId];
+        require(batch_.timestamp + CHALLENGE_WINDOW >= now, ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+
+        // TODO: implement RLP verification
+        require(_success, ERROR_CHALLENGE_REJECTED);
+        batch_.valid = false;
+        vote_.yea = vote_.yea.sub(batch_.yea);
+        vote_.nay = vote_.nay.sub(batch_.nay);
+        emit AcceptChallenge(_voteId, _batchId, msg.sender, keccak256(abi.encodePacked(_proof)));
+
+        require(token.transfer(msg.sender, SLASHING_COST));
     }
 
     /**
@@ -186,7 +206,7 @@ contract Voting is IForwarder, AragonApp {
     */
     function forward(bytes _evmScript) public {
         require(canForward(msg.sender, _evmScript), ERROR_CAN_NOT_FORWARD);
-        _newVote(_evmScript, "", true, true);
+        _newVote(_evmScript, "");
     }
 
     function canForward(address _sender, bytes) public view returns (bool) {
@@ -194,16 +214,23 @@ contract Voting is IForwarder, AragonApp {
         return canPerform(_sender, CREATE_VOTES_ROLE, arr());
     }
 
-    function canVote(uint256 _voteId, address _voter) public view voteExists(_voteId) returns (bool) {
+    function canSubmit(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
-
-        return _isVoteOpen(vote_) && token.balanceOfAt(_voter, vote_.snapshotBlock) > 0;
+        bool isOpen = _isVoteOpen(vote_);
+        bool hasEnoughBalanceToPayChallenges = token.balanceOf(this) >= SLASHING_COST.mul(vote_.batchesLength.add(1));
+        return isOpen && hasEnoughBalanceToPayChallenges;
     }
 
     function canExecute(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
 
         if (vote_.executed) {
+            return false;
+        }
+
+        // Has challenge period ended?
+        Batch storage batch_ = vote_.batches[vote_.batchesLength.sub(1)];
+        if (batch_.timestamp + CHALLENGE_WINDOW >= now) {
             return false;
         }
 
@@ -248,7 +275,6 @@ contract Voting is IForwarder, AragonApp {
         )
     {
         Vote storage vote_ = votes[_voteId];
-
         open = _isVoteOpen(vote_);
         executed = vote_.executed;
         startDate = vote_.startDate;
@@ -261,14 +287,30 @@ contract Voting is IForwarder, AragonApp {
         script = vote_.executionScript;
     }
 
-    function getVoterState(uint256 _voteId, address _voter) public view voteExists(_voteId) returns (VoterState) {
-        return votes[_voteId].voters[_voter];
+    function getBatch(uint256 _voteId, uint256 _batchId)
+        public
+        view
+        batchExists(_voteId, _batchId)
+        returns (
+            uint256 id,
+            bool valid,
+            uint256 yea,
+            uint256 nay,
+            uint256 timestamp,
+            bytes32 proofHash
+        )
+    {
+        Vote storage vote_ = votes[_voteId];
+        Batch storage batch_ = vote_.batches[_batchId];
+        id = batch_.id;
+        yea = batch_.yea;
+        nay = batch_.nay;
+        valid = batch_.valid;
+        proofHash = batch_.proofHash;
+        timestamp = batch_.timestamp;
     }
 
-    function _newVote(bytes _executionScript, string _metadata, bool _castVote, bool _executesIfDecided)
-        internal
-        returns (uint256 voteId)
-    {
+    function _newVote(bytes _executionScript, string _metadata) internal returns (uint256 voteId) {
         uint256 votingPower = token.totalSupplyAt(vote_.snapshotBlock);
         require(votingPower > 0, ERROR_NO_VOTING_POWER);
 
@@ -282,45 +324,25 @@ contract Voting is IForwarder, AragonApp {
         vote_.executionScript = _executionScript;
 
         emit StartVote(voteId, msg.sender, _metadata);
-
-        if (_castVote && canVote(voteId, msg.sender)) {
-            _vote(voteId, true, msg.sender, _executesIfDecided);
-        }
     }
 
-    function _vote(
-        uint256 _voteId,
-        bool _supports,
-        address _voter,
-        bool _executesIfDecided
-    ) internal
-    {
+    function _submitBatch(uint256 _voteId, uint256 _yea, uint256 _nay, bytes _proof) internal {
         Vote storage vote_ = votes[_voteId];
+        uint256 _batchId = vote_.batchesLength;
+        bytes32 _proofHash = keccak256(abi.encodePacked(_proof));
 
-        // This could re-enter, though we can assume the governance token is not malicious
-        uint256 voterStake = token.balanceOfAt(_voter, vote_.snapshotBlock);
-        VoterState state = vote_.voters[_voter];
+        Batch storage batch_ = vote_.batches[vote_.batchesLength];
+        batch_.id = _batchId;
+        batch_.valid = true;
+        batch_.yea = _yea;
+        batch_.nay = _nay;
+        batch_.proofHash = _proofHash;
+        batch_.timestamp = block.timestamp;
+        vote_.yea = vote_.yea.add(_yea);
+        vote_.nay = vote_.nay.add(_nay);
+        vote_.batchesLength = vote_.batchesLength.add(1);
 
-        // If voter had previously voted, decrease count
-        if (state == VoterState.Yea) {
-            vote_.yea = vote_.yea.sub(voterStake);
-        } else if (state == VoterState.Nay) {
-            vote_.nay = vote_.nay.sub(voterStake);
-        }
-
-        if (_supports) {
-            vote_.yea = vote_.yea.add(voterStake);
-        } else {
-            vote_.nay = vote_.nay.add(voterStake);
-        }
-
-        vote_.voters[_voter] = _supports ? VoterState.Yea : VoterState.Nay;
-
-        emit CastVote(_voteId, _voter, _supports, voterStake);
-
-        if (_executesIfDecided && canExecute(_voteId)) {
-            _executeVote(_voteId);
-        }
+        emit SubmitBatch(_voteId, _batchId, _proofHash, _yea, _nay);
     }
 
     function _executeVote(uint256 _voteId) internal {
@@ -348,5 +370,15 @@ contract Voting is IForwarder, AragonApp {
 
         uint256 computedPct = _value.mul(PCT_BASE) / _total;
         return computedPct > _pct;
+    }
+
+    function _existsVote(uint256 _voteId) internal view returns (bool) {
+        return _voteId < votesLength;
+    }
+
+    function _existsBatch(uint256 _voteId, uint256 _batchId) internal view returns (bool) {
+        if (!_existsVote(_voteId)) return false;
+        Vote storage vote_ = votes[_voteId];
+        return _batchId < vote_.batchesLength;
     }
 }
