@@ -1,4 +1,3 @@
-const sha3 = require('solidity-sha3').default
 const timeTravel = require('@aragon/test-helpers/timeTravel')(web3)
 const getBlockNumber = require('@aragon/test-helpers/blockNumber')(web3)
 const { assertRevert } = require('@aragon/test-helpers/assertThrow')
@@ -430,7 +429,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                             const size = 3
                             const yeas = bigExp(80, decimals)
                             const nays = bigExp(20, decimals)
-                            const proof = "0x"
+                            const proof = ''
 
                             beforeEach('submit batch', async function () {
                                 batchId = submittedBatchId(await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer }))
@@ -445,7 +444,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                         assert(yea.eq(yeas), 'batch yeas should match')
                                         assert(nay.eq(nays), 'batch nays should match')
                                         assert(length.eq(size), 'batch size should match')
-                                        // FIXME: assert.equal(proofHash, sha3(proof), 'batch proof should match')
+                                        assert.equal(proofHash, web3.sha3(proof, { encoding: 'hex' }), 'batch proof should match')
                                     })
                                 })
 
