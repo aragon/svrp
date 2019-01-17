@@ -45,6 +45,7 @@
     "@aragon/apps-shared-migrations": "1.0.0",
     "eth-gas-reporter": "^0.1.5",
     "ganache-cli": "^6.1.0",
+    "rlp": "^2.1.0",
     "solidity-coverage": "0.5.11",
     "solidity-sha3": "^0.4.1",
     "solium": "^1.0.4",
