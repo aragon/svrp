@@ -1,16 +1,18 @@
+const SVRP = require('../lib/SVRP')
+const { signVote } = require('../lib/sign')
+
 const timeTravel = require('@aragon/test-helpers/timeTravel')(web3)
 const getBlockNumber = require('@aragon/test-helpers/blockNumber')(web3)
 const { assertRevert } = require('@aragon/test-helpers/assertThrow')
 const { encodeCallScript, EMPTY_SCRIPT } = require('@aragon/test-helpers/evmScript')
 
+const Voting = artifacts.require('VotingMock')
+const ExecutionTarget = artifacts.require('ExecutionTarget')
 const ACL = artifacts.require('@aragon/os/contracts/acl/ACL')
 const Kernel = artifacts.require('@aragon/os/contracts/kernel/Kernel')
 const DAOFactory = artifacts.require('@aragon/os/contracts/factory/DAOFactory')
 const MiniMeToken = artifacts.require('@aragon/apps-shared-minime/contracts/MiniMeToken')
 const EVMScriptRegistryFactory = artifacts.require('@aragon/os/contracts/factory/EVMScriptRegistryFactory')
-
-const Voting = artifacts.require('VotingMock')
-const ExecutionTarget = artifacts.require('ExecutionTarget')
 
 const pct16 = x => bigExp(x, 16)
 const bigExp = (x, y) => new web3.BigNumber(x).times(new web3.BigNumber(10).toPower(y))
@@ -19,16 +21,18 @@ const createdVoteId = receipt => startVoteEvent(receipt).voteId
 const submittedBatchId = receipt => submitBatchEvent(receipt).batchId
 const startVoteEvent = receipt => receipt.logs.filter(x => x.event === 'StartVote')[0].args
 const submitBatchEvent = receipt => receipt.logs.filter(x => x.event === 'SubmitBatch')[0].args
-const acceptChallengeEvent = receipt => receipt.logs.filter(x => x.event === 'AcceptChallenge')[0].args
+const invalidVoteEvent = receipt => receipt.logs.filter(x => x.event === 'InvalidVote')[0].args
+const invalidVoteStakeEvent = receipt => receipt.logs.filter(x => x.event === 'InvalidVoteStake')[0].args
+const invalidAggregationEvent = receipt => receipt.logs.filter(x => x.event === 'InvalidAggregation')[0].args
 
 const NULL_ADDRESS = '0x00'
-const ANY_ADDR = '0xffffffffffffffffffffffffffffffffffffffff'
+const ANY_ADDRESS = '0xffffffffffffffffffffffffffffffffffffffff'
 
 contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, nonHolder, relayer]) => {
     const votingTime = 1000
     const challengeWindowSeconds = 7 * 60 * 60 * 24 // 7 days
 
-    let daoFactory, votingBase, voting, voteId, batchId, relayerBalance, script, token, collateralToken, executionTarget
+    let daoFactory, votingBase, voting, votingAddress, voteId, batchId, relayerBalance, script, token, collateralToken, executionTarget
     let APP_MANAGER_ROLE, CREATE_VOTES_ROLE, SUBMIT_BATCH_ROLE, MODIFY_SUPPORT_ROLE, MODIFY_QUORUM_ROLE
 
     before('setup kernel', async function () {
@@ -54,13 +58,13 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
         await acl.createPermission(root, dao.address, APP_MANAGER_ROLE, root, { from: root })
 
         const { logs: logs2 } = await dao.newAppInstance('0x1234', votingBase.address, '0x', false, { from: root })
-        const votingAddress = logs2.filter(l => l.event === 'NewAppProxy')[0].args.proxy;
+        votingAddress = logs2.filter(l => l.event === 'NewAppProxy')[0].args.proxy;
         voting = Voting.at(votingAddress)
 
         await acl.createPermission(relayer, votingAddress, SUBMIT_BATCH_ROLE, root, { from: root })
-        await acl.createPermission(ANY_ADDR, votingAddress, CREATE_VOTES_ROLE, root, { from: root })
-        await acl.createPermission(ANY_ADDR, votingAddress, MODIFY_QUORUM_ROLE, root, { from: root })
-        await acl.createPermission(ANY_ADDR, votingAddress, MODIFY_SUPPORT_ROLE, root, { from: root })
+        await acl.createPermission(ANY_ADDRESS, votingAddress, CREATE_VOTES_ROLE, root, { from: root })
+        await acl.createPermission(ANY_ADDRESS, votingAddress, MODIFY_QUORUM_ROLE, root, { from: root })
+        await acl.createPermission(ANY_ADDRESS, votingAddress, MODIFY_SUPPORT_ROLE, root, { from: root })
     })
 
     beforeEach('initialize collateral token', async function () {
@@ -76,7 +80,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
         })
     })
 
-    describe('isValuePct', async function () {
+    describe('isValuePct', function () {
         it('tests total = 0', async function () {
             const result1 = await voting.isValuePct(0, 0, pct16(50))
             assert.equal(result1, false, "total 0 should always return false")
@@ -189,10 +193,14 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                 })
 
                 context('with normal total supply', function () {
+                    const holder20Balance = bigExp(20, decimals)
+                    const holder29Balance = bigExp(29, decimals)
+                    const holder51Balance = bigExp(51, decimals)
+
                     beforeEach('mint minime tokens for holders', async function () {
-                        await token.generateTokens(holder20, bigExp(20, decimals))
-                        await token.generateTokens(holder29, bigExp(29, decimals))
-                        await token.generateTokens(holder51, bigExp(51, decimals))
+                        await token.generateTokens(holder20, holder20Balance)
+                        await token.generateTokens(holder29, holder29Balance)
+                        await token.generateTokens(holder51, holder51Balance)
                     })
 
                     describe('changeRequiredSupport', function () {
@@ -293,6 +301,9 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                             const action = { to: executionTarget.address, calldata: executionTarget.contract.execute.getData() }
                             script = encodeCallScript([action, action])
                             voteId = createdVoteId(await voting.newVote(script, 'metadata', { from: holder20 }))
+
+                            const state = await voting.getVote(voteId)
+                            const snapshotBlock = state[3]
                         })
 
                         describe('getVote', function () {
@@ -363,7 +374,6 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                         })
 
                         describe('submitBatch', function () {
-                            const size = 3
                             const yeas = bigExp(80, decimals)
                             const nays = bigExp(20, decimals)
                             const proof = "0x"
@@ -374,7 +384,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 context('when the vote is not executed yet', function () {
                                     context('when the vote is open', function () {
                                         it('adds a new batch to the voting', async function () {
-                                            const receipt = await voting.submitBatch(voteId, size, yeas, nays, proof, { from })
+                                            const receipt = await voting.submitBatch(voteId, yeas, nays, proof, { from })
 
                                             const event = submitBatchEvent(receipt)
                                             assert.notEqual(event, null)
@@ -393,7 +403,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                         it('reverts', async function () {
                                             return assertRevert(async () => {
-                                                await voting.submitBatch(voteId, size, yeas, nays, proof, { from })
+                                                await voting.submitBatch(voteId, yeas, nays, proof, { from })
                                             })
                                         })
                                     })
@@ -401,14 +411,14 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                 context('when the vote is already executed', function () {
                                     beforeEach('execute vote', async function () {
-                                        await voting.submitBatch(voteId, size, yeas, nays, proof, { from })
+                                        await voting.submitBatch(voteId, yeas, nays, proof, { from })
                                         await timeTravel(votingTime + challengeWindowSeconds + 1)
                                         await voting.executeVote(voteId)
                                     })
 
                                     it('reverts', async function () {
                                         return assertRevert(async () => {
-                                            await voting.submitBatch(voteId, size, yeas, nays, proof, { from })
+                                            await voting.submitBatch(voteId, yeas, nays, proof, { from })
                                         })
                                     })
                                 })
@@ -419,31 +429,29 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                 it('reverts', async function () {
                                     return assertRevert(async () => {
-                                        await voting.submitBatch(voteId, size, yeas, nays, proof, { from })
+                                        await voting.submitBatch(voteId, yeas, nays, proof, { from })
                                     })
                                 })
                             })
                         })
 
                         describe('getBatch', function () {
-                            const size = 3
                             const yeas = bigExp(80, decimals)
                             const nays = bigExp(20, decimals)
                             const proof = ''
 
                             beforeEach('submit batch', async function () {
-                                batchId = submittedBatchId(await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer }))
+                                batchId = submittedBatchId(await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer }))
                             })
 
                             context('when the given vote exists', function () {
                                 context('when the given batch exists', function () {
                                     it('fetches the requested batch', async function () {
-                                        const [valid, yea, nay, length, _, proofHash] = await voting.getBatch(voteId, batchId)
+                                        const [valid, yea, nay, timestamp, proofHash] = await voting.getBatch(voteId, batchId)
 
                                         assert(valid, 'batch should be valid by default')
                                         assert(yea.eq(yeas), 'batch yeas should match')
                                         assert(nay.eq(nays), 'batch nays should match')
-                                        assert(length.eq(size), 'batch size should match')
                                         assert.equal(proofHash, web3.sha3(proof, { encoding: 'hex' }), 'batch proof should match')
                                     })
                                 })
@@ -466,83 +474,304 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                             })
                         })
 
-                        describe('challenge', function () {
-                            const size = 3
-                            const yeas = bigExp(80, decimals)
-                            const nays = bigExp(20, decimals)
-                            const proof = "0x"
-                            const challengeProof = "0x"
+                        describe('challengeAggregation', function () {
+                            let holder20Vote, holder29Vote, holder20Vote2, foreignVote, submittedYeas, submittedNays
+                            let correctProof, proofWithDuplicatedVote, invalidProof, proofWithForeignVotes, proofWithDifferentVotes
 
-                            beforeEach('submit batch', async function () {
-                                batchId = submittedBatchId(await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer }))
+                            beforeEach('build vote messages', async function () {
+                                holder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                holder29Vote = signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote2 = signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
+                                foreignVote = signVote(holder20, { votingAddress: NULL_ADDRESS, voteId, stake: holder20Balance, supports: true })
+
+                                invalidProof = '0xdead'
+                                correctProof = `0x${SVRP.encode([holder20Vote, holder29Vote], 'hex')}`
+                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, foreignVote], 'hex')}`
+                                proofWithDuplicatedVote = `0x${SVRP.encode([holder20Vote, holder20Vote], 'hex')}`
+                                proofWithDifferentVotes = `0x${SVRP.encode([holder20Vote, holder20Vote2], 'hex')}`
                             })
 
                             context('when the given vote exists', function () {
                                 context('when the given batch exists', function () {
                                     context('when the vote is within the challenge period', function () {
                                         context('when the challenge succeeds', function () {
-                                            const success = true
+                                            context('when the aggregation was wrong', function () {
+                                                beforeEach('submit batch with wrong totals', async function () {
+                                                    submittedYeas = bigExp(20, decimals)
+                                                    submittedNays = bigExp(29, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                                })
 
-                                            it('accepts the challenge', async function () {
-                                                const receipt = await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
-                                                const event = acceptChallengeEvent(receipt)
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
+                                                    const event = invalidAggregationEvent(receipt)
 
-                                                assert.notEqual(event, null, 'event should exist')
-                                                assert(event.voteId.eq(voteId), 'vote ID should match')
-                                                assert(event.batchId.eq(batchId), 'batch ID should match')
-                                                assert.equal(event.sender, nonHolder, 'sender should match')
-                                                assert.equal(event.proof, challengeProof, 'sender should match')
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, correctProof, 'proof should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
                                             })
 
-                                            it('reverts the challenged batch', async  function () {
-                                                await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
+                                            // TODO: fix validation in voting contract
+                                            xcontext('when there was a duplicated vote', function () {
+                                                beforeEach('submit batch with duplicated vote', async function () {
+                                                    submittedYeas = bigExp(58, decimals)
+                                                    submittedNays = bigExp(0, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithDuplicatedVote, { from: relayer }))
+                                                })
 
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
+                                                    const event = invalidAggregationEvent(receipt)
 
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithDuplicatedVote, 'proof should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
                                             })
 
-                                            it('receives the slashing payout', async function () {
-                                                const slashingCost = await voting.slashingCost()
-                                                const previousBalance = await collateralToken.balanceOf(nonHolder)
+                                            context('when the proof was invalid', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, invalidProof, { from: relayer }))
+                                                })
 
-                                                await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
 
-                                                const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, invalidProof, 'proof should match')
+                                                    assert(event.voteIndex.eq(0), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+
+                                            context('when the proof included a vote from another voting app', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithForeignVotes, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeAggregation(voteId, batchId, proofWithForeignVotes, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithForeignVotes, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithForeignVotes, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+
+                                            context('when the proof included casted votes from different votes', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithDifferentVotes, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeAggregation(voteId, batchId, proofWithDifferentVotes, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithDifferentVotes, 'proof should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithDifferentVotes, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeAggregation(voteId, batchId, proofWithDifferentVotes, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
                                             })
                                         })
 
                                         context('when the challenge does not succeed', function () {
-                                            const success = false
+                                            beforeEach('submit valid batch', async function () {
+                                                submittedYeas = bigExp(49, decimals)
+                                                submittedNays = bigExp(0, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                            })
 
-                                            it('reverts', async  function () {
-                                                return assertRevert(async () => {
-                                                    await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
+                                            context('when the given proof matches the one submitted by the relayer', function () {
+                                                it('reverts', async  function () {
+                                                    return assertRevert(async () => {
+                                                        await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
+                                                    })
+                                                })
+                                            })
+
+                                            context('when the given proof does not match the one submitted by the relayer', function () {
+                                                it('reverts', async  function () {
+                                                    return assertRevert(async () => {
+                                                        await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
+                                                    })
                                                 })
                                             })
                                         })
                                     })
 
                                     context('when the vote is outside the challenge period', function () {
-                                        beforeEach('travel outside the challenge period', async function () {
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
-                                        })
-
                                         context('when the challenge succeeds', function () {
-                                            const success = true
+                                            beforeEach('submit batch with wrong totals', async function () {
+                                                submittedYeas = bigExp(20, decimals)
+                                                submittedNays = bigExp(29, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            })
 
                                             it('reverts', async  function () {
                                                 return assertRevert(async () => {
-                                                    await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
+                                                    await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
                                                 })
                                             })
                                         })
 
                                         context('when the challenge does not succeed', function () {
-                                            const success = false
+                                            beforeEach('submit valid batch', async function () {
+                                                submittedYeas = bigExp(49, decimals)
+                                                submittedNays = bigExp(0, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            })
 
                                             it('reverts', async  function () {
                                                 return assertRevert(async () => {
-                                                    await voting.challenge(voteId, batchId, challengeProof, success, { from: nonHolder })
+                                                    await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
                                                 })
                                             })
                                         })
@@ -552,24 +781,319 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 context('when the given batch does not exist', function () {
                                     it('reverts', async function () {
                                         return assertRevert(async () => {
-                                            await voting.challenge(voteId, batchId + 1, challengeProof, true, { from: nonHolder })
+                                            await voting.challengeAggregation(voteId, batchId + 1, correctProof, { from: nonHolder })
                                         })
                                     })
                                 })
                             })
 
                             context('when the given vote does not exist', function () {
+                                beforeEach('submit valid batch', async function () {
+                                    submittedYeas = bigExp(49, decimals)
+                                    submittedNays = bigExp(0, decimals)
+                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                })
+
                                 it('reverts', async function () {
                                     return assertRevert(async () => {
-                                        await voting.challenge(voteId + 1, batchId, challengeProof, true, { from: nonHolder })
+                                        await voting.challengeAggregation(voteId + 1, batchId, correctProof, { from: nonHolder })
                                     })
                                 })
                             })
                         })
 
+                        describe('challengeVote', function () {
+                            let holder20Vote, holder29Vote, holder20Vote2, foreignVote, nonHolderVote, submittedYeas, submittedNays
+                            let correctProof, proofWithDuplicatedVote, invalidProof, proofWithForeignVotes, proofWithDifferentVotes, proofWithInvalidStakeVotes
+
+                            beforeEach('build vote messages', async function () {
+                                nonHolderVote = signVote(nonHolder, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                holder29Vote = signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote2 = signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
+                                foreignVote = signVote(holder20, { votingAddress: NULL_ADDRESS, voteId, stake: holder20Balance, supports: true })
+
+                                invalidProof = '0xdead'
+                                correctProof = `0x${SVRP.encode([holder20Vote, holder29Vote], 'hex')}`
+                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, foreignVote], 'hex')}`
+                                proofWithDuplicatedVote = `0x${SVRP.encode([holder20Vote, holder20Vote], 'hex')}`
+                                proofWithDifferentVotes = `0x${SVRP.encode([holder20Vote, holder20Vote2], 'hex')}`
+                                proofWithInvalidStakeVotes = `0x${SVRP.encode([holder20Vote, nonHolderVote], 'hex')}`
+                            })
+
+                            context('when the given vote exists', function () {
+                                context('when the given batch exists', function () {
+                                    context('when the vote is within the challenge period', function () {
+                                        context('when the challenge succeeds', function () {
+                                            context('when the a vote stake was wrong', function () {
+                                                beforeEach('submit batch with wrong stakes', async function () {
+                                                    submittedYeas = bigExp(20, decimals)
+                                                    submittedNays = bigExp(29, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithInvalidStakeVotes, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeVoteStake(voteId, batchId, proofWithInvalidStakeVotes, 1, { from: nonHolder })
+                                                    const event = invalidVoteStakeEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithInvalidStakeVotes, 'proof should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithInvalidStakeVotes, 1, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithInvalidStakeVotes, 1, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+
+                                            context('when the proof was invalid', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, invalidProof, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeVoteStake(voteId, batchId, invalidProof, 0, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, invalidProof, 'proof should match')
+                                                    assert(event.voteIndex.eq(0), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeVoteStake(voteId, batchId, invalidProof, 0, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeVoteStake(voteId, batchId, invalidProof, 0, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+
+                                            context('when the proof included a vote from another voting app', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithForeignVotes, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeVoteStake(voteId, batchId, proofWithForeignVotes, 1, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithForeignVotes, 1, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithForeignVotes, 1, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+
+                                            context('when the proof included casted votes from different votes', function () {
+                                                beforeEach('submit batch with invalid proof', async function () {
+                                                    submittedYeas = bigExp(49, decimals)
+                                                    submittedNays = bigExp(20, decimals)
+                                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, proofWithDifferentVotes, { from: relayer }))
+                                                })
+
+                                                it('accepts the challenge', async function () {
+                                                    const receipt = await voting.challengeVoteStake(voteId, batchId, proofWithDifferentVotes, 1, { from: nonHolder })
+                                                    const event = invalidVoteEvent(receipt)
+
+                                                    assert.notEqual(event, null, 'event should exist')
+                                                    assert(event.voteId.eq(voteId), 'vote ID should match')
+                                                    assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert.equal(event.proof, proofWithDifferentVotes, 'proof should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                })
+
+                                                it('reverts the challenged batch', async  function () {
+                                                    const previousState = await voting.getVote(voteId)
+                                                    const previousYeas = previousState[6]
+                                                    const previousNays = previousState[7]
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithDifferentVotes, 1, { from: nonHolder })
+
+                                                    const currentState = await voting.getVote(voteId)
+                                                    const currentYeas = currentState[6]
+                                                    const currentNays = currentState[7]
+
+                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                })
+
+                                                it('transfers the slashing payout', async function () {
+                                                    const slashingCost = await voting.slashingCost()
+                                                    const previousBalance = await collateralToken.balanceOf(nonHolder)
+
+                                                    await voting.challengeVoteStake(voteId, batchId, proofWithDifferentVotes, 1, { from: nonHolder })
+
+                                                    const currentBalance = await collateralToken.balanceOf(nonHolder)
+                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                })
+                                            })
+                                        })
+
+                                        context('when the challenge does not succeed', function () {
+                                            beforeEach('submit valid batch', async function () {
+                                                submittedYeas = bigExp(49, decimals)
+                                                submittedNays = bigExp(0, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                            })
+
+                                            context('when the given proof matches the one submitted by the relayer', function () {
+                                                it('reverts', async  function () {
+                                                    return assertRevert(async () => {
+                                                        await voting.challengeVoteStake(voteId, batchId, correctProof, 1, { from: nonHolder })
+                                                    })
+                                                })
+                                            })
+
+                                            context('when the given proof does not match the one submitted by the relayer', function () {
+                                                it('reverts', async  function () {
+                                                    return assertRevert(async () => {
+                                                        await voting.challengeVoteStake(voteId, batchId, invalidProof, 1, { from: nonHolder })
+                                                    })
+                                                })
+                                            })
+                                        })
+                                    })
+
+                                    context('when the vote is outside the challenge period', function () {
+                                        context('when the challenge succeeds', function () {
+                                            beforeEach('submit batch with wrong totals', async function () {
+                                                submittedYeas = bigExp(20, decimals)
+                                                submittedNays = bigExp(29, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            })
+
+                                            it('reverts', async  function () {
+                                                return assertRevert(async () => {
+                                                    await voting.challengeVoteStake(voteId, batchId, correctProof, 1, { from: nonHolder })
+                                                })
+                                            })
+                                        })
+
+                                        context('when the challenge does not succeed', function () {
+                                            beforeEach('submit valid batch', async function () {
+                                                submittedYeas = bigExp(49, decimals)
+                                                submittedNays = bigExp(0, decimals)
+                                                batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            })
+
+                                            it('reverts', async  function () {
+                                                return assertRevert(async () => {
+                                                    await voting.challengeVoteStake(voteId, batchId, correctProof, 1, { from: nonHolder })
+                                                })
+                                            })
+                                        })
+                                    })
+                                })
+
+                                context('when the given batch does not exist', function () {
+                                    it('reverts', async function () {
+                                        return assertRevert(async () => {
+                                            await voting.challengeVoteStake(voteId, batchId + 1, correctProof, 1, { from: nonHolder })
+                                        })
+                                    })
+                                })
+                            })
+
+                            context('when the given vote does not exist', function () {
+                                beforeEach('submit valid batch', async function () {
+                                    submittedYeas = bigExp(49, decimals)
+                                    submittedNays = bigExp(0, decimals)
+                                    batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
+                                })
+
+                                it('reverts', async function () {
+                                    return assertRevert(async () => {
+                                        await voting.challengeVoteStake(voteId + 1, batchId, correctProof, 1, { from: nonHolder })
+                                    })
+                                })
+                            })
+                        })
+
+                        xdescribe('challengeDuplication', function () {
+                            // TODO: solve contract function arguments issue
+                        })
+
                         describe('executeVote', function () {
                             context('when the given vote exists', function () {
-                                const size = 2
                                 const proof = "0x"
 
                                 context('when there is enough quorum', function () {
@@ -579,7 +1103,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                         const yeas = bigExp(29, decimals)
 
                                         beforeEach('submit batch with enough support', async function () {
-                                            await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer })
+                                            await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
                                             await timeTravel(votingTime + challengeWindowSeconds + 1)
                                         })
 
@@ -598,7 +1122,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                         const yeas = bigExp(10, decimals)
 
                                         beforeEach('submit batch without support', async function () {
-                                            await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer })
+                                            await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
                                             await timeTravel(votingTime + challengeWindowSeconds + 1)
                                         })
 
@@ -617,7 +1141,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                         const yeas = bigExp(19, decimals)
 
                                         beforeEach('submit batch with enough support', async function () {
-                                            await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer })
+                                            await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
                                             await timeTravel(votingTime + challengeWindowSeconds + 1)
                                         })
 
@@ -632,7 +1156,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                         const yeas = bigExp(9, decimals)
 
                                         beforeEach('submit batch without support', async function () {
-                                            await voting.submitBatch(voteId, size, yeas, nays, proof, { from: relayer })
+                                            await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
                                             await timeTravel(votingTime + challengeWindowSeconds + 1)
                                         })
 
@@ -660,10 +1184,9 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 // with new quorum at 70% it shouldn't have, but since min quorum is snapshotted
                                 // it will succeed
 
-                                const size = 2
                                 const yeas = bigExp(69, decimals)
                                 const nays = bigExp(10, decimals)
-                                await voting.submitBatch(voteId, size, yeas, nays, 'proof', { from: relayer })
+                                await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
                                 await timeTravel(votingTime + challengeWindowSeconds + 1)
 
                                 const state = await voting.getVote(voteId)
@@ -683,10 +1206,9 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 // with new quorum at 50% it shouldn't have, but since min quorum is snapshotted
                                 // it will succeed
 
-                                const size = 2
                                 const yeas = bigExp(29, decimals)
                                 const nays = bigExp(0, decimals)
-                                await voting.submitBatch(voteId, size, yeas, nays, 'proof', { from: relayer })
+                                await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
                                 await timeTravel(votingTime + challengeWindowSeconds + 1)
 
                                 const state = await voting.getVote(voteId)
