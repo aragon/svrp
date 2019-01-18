@@ -1,5 +1,5 @@
-const SVRP = require('../lib/SVRP')
-const { signVote } = require('../lib/sign')
+const SVRP = require('../../lib/SVRP')
+const { signVote } = require('../../lib/sign')
 
 const timeTravel = require('@aragon/test-helpers/timeTravel')(web3)
 const getBlockNumber = require('@aragon/test-helpers/blockNumber')(web3)
@@ -183,8 +183,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
         const neededSupport = pct16(50)             // yeas must be greater than the 50% of the total votes
         const minimumAcceptanceQuorum = pct16(20)   // yeas must be greater than the 20% of the voting power
 
-        // for (const decimals of [0, 2, 18, 26]) {
-        for (const decimals of [18]) {
+        for (const decimals of [0, 2, 18, 26]) {
             context(`with ${decimals} decimals`, () => {
                 beforeEach('initialize voting instance', async function () {
                     token = await MiniMeToken.new(NULL_ADDRESS, NULL_ADDRESS, 0, 'n', decimals, 'n', true) // empty parameters minime
