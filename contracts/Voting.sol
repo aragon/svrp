@@ -199,7 +199,7 @@ contract Voting is IForwarder, AragonApp {
             return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
         }
 
-        require(false, ERROR_CHALLENGE_REJECTED);
+        revert(ERROR_CHALLENGE_REJECTED);
     }
 
     /**
@@ -221,7 +221,7 @@ contract Voting is IForwarder, AragonApp {
             return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
         }
 
-        require(false, ERROR_CHALLENGE_REJECTED);
+        revert(ERROR_CHALLENGE_REJECTED);
     }
 
     /**
@@ -249,7 +249,7 @@ contract Voting is IForwarder, AragonApp {
             return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
         }
 
-        require(false, ERROR_CHALLENGE_REJECTED);
+        revert(ERROR_CHALLENGE_REJECTED);
     }
 
     /**
