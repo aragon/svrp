@@ -242,7 +242,7 @@ contract Voting is IForwarder, AragonApp {
             emit InvalidVote(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
             return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
         }
-        if (_isDoubleVoting(_voteId, _previousProof, _previousVoteIndex, _currentProof, _currentVoteIndex)) {
+        if (_isDoubleVoting(_previousProof, _previousVoteIndex, _currentProof, _currentVoteIndex)) {
             // TODO: emit single event - this is a hack to avoid stack level too deep error
             emit VoteDuplication(_voteId, _previousBatchId, _previousProof, _previousVoteIndex);
             emit VoteDuplication(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
@@ -485,7 +485,7 @@ contract Voting is IForwarder, AragonApp {
     * @dev Checks whether a vote was included in two batches based on given proofs
     * @return true if the given proofs are valid and the vote was duplicated
     */
-    function _isDoubleVoting(uint256 _voteId, bytes _proof, uint256 _voteIndex, bytes _anotherProof, uint256 _anotherVoteIndex) internal pure returns (bool) {
+    function _isDoubleVoting(bytes _proof, uint256 _voteIndex, bytes _anotherProof, uint256 _anotherVoteIndex) internal pure returns (bool) {
         RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
         RLP.RLPItem[] memory anotherVote = _anotherProof.voteAt(_anotherVoteIndex);
         return vote.voter() == anotherVote.voter();
