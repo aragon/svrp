@@ -86,7 +86,7 @@ contract Voting is IForwarder, AragonApp {
     event InvalidVote(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
     event InvalidAggregation(uint256 indexed voteId, uint256 indexed batchId, bytes proof);
     event InvalidVoteStake(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
-    event VoteDuplication(uint256 indexed voteId, uint256 indexed batchId, uint256 indexed anotherBatchId, bytes proof, bytes anotherProof, uint256 voteIndex, uint256 anotherVoteIndex);
+    event VoteDuplication(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
 
     modifier voteExists(uint256 _voteId) {
         require(_existsVote(_voteId), ERROR_NO_VOTE);
@@ -183,97 +183,74 @@ contract Voting is IForwarder, AragonApp {
     * @notice Challenge batch for invalid aggregation
     */
     function challengeAggregation(uint256 _voteId, uint256 _batchId, bytes _proof) external batchExists(_voteId, _batchId) {
-        Vote storage vote_ = votes[_voteId];
-        Batch storage batch_ = vote_.batches[_batchId];
+        Batch storage batch_ = votes[_voteId].batches[_batchId];
+
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
         require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
 
-        if (_proof.isValid()) {
-            // if proof can be decoded
-            (bool invalidVote, uint256 voteIndex, bool invalidAggregation) = _isInvalidAggregation(_voteId, batch_, _proof);
+        (bool invalidVote, uint256 voteIndex, bool invalidAggregation) = _isInvalidAggregation(_voteId, batch_, _proof);
 
-            if (invalidVote) {
-                // if any vote couldn't be decoded
-                emit InvalidVote(_voteId, _batchId, _proof, voteIndex);
-                _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-            } else {
-                // require bad aggregation
-                require(invalidAggregation, ERROR_CHALLENGE_REJECTED);
-                emit InvalidAggregation(_voteId, _batchId, _proof);
-                _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-            }
-        } else {
-            emit InvalidProof(_voteId, _batchId, _proof);
-            _rollbackBatchAndSlash(vote_, batch_, msg.sender);
+        if (invalidVote) {
+            emit InvalidVote(_voteId, _batchId, _proof, voteIndex);
+            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
         }
+        if (invalidAggregation) {
+            emit InvalidAggregation(_voteId, _batchId, _proof);
+            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+        }
+
+        require(false, ERROR_CHALLENGE_REJECTED);
     }
 
     /**
     * @notice Challenge batch for invalid vote
     */
     function challengeVoteStake(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex) external batchExists(_voteId, _batchId) {
-        Vote storage vote_ = votes[_voteId];
-        Batch storage batch_ = vote_.batches[_batchId];
+        Batch storage batch_ = votes[_voteId].batches[_batchId];
+
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
+        require(_proof.isValidIndex(_voteIndex), ERROR_CHALLENGE_REJECTED);
         require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
 
-        if (_proof.isValid()) {
-            // if proof can be decoded
-            (bool invalidVote, bool invalidStake) = _isInvalidStake(_voteId, _proof, _voteIndex);
-
-            if (invalidVote) {
-                // if vote couldn't be decoded
-                emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
-                _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-            } else {
-                // require invalid stake
-                require(invalidStake, ERROR_CHALLENGE_REJECTED);
-                emit InvalidVoteStake(_voteId, _batchId, _proof, _voteIndex);
-                _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-            }
-        } else {
-            emit InvalidProof(_voteId, _batchId, _proof);
-            _rollbackBatchAndSlash(vote_, batch_, msg.sender);
+        if (_isInvalidVote(_voteId, _proof, _voteIndex)) {
+            emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
+            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
         }
+        if (_isInvalidStake(_voteId, _proof, _voteIndex)) {
+            emit InvalidVoteStake(_voteId, _batchId, _proof, _voteIndex);
+            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+        }
+
+        require(false, ERROR_CHALLENGE_REJECTED);
     }
 
-    // TODO: Fix stack level too deep issue
     /**
     * @notice Challenge batch for votes duplication
     */
-//    function challengeDuplication(uint256 _voteId, uint256 _batchId, uint256 _anotherBatchId, uint256 _voteIndex, uint256 _anotherVoteIndex, bytes _proof, bytes _anotherProof) external batchExists(_voteId, _batchId) batchExists(_voteId, _anotherBatchId) {
-//        Vote storage vote_ = votes[_voteId];
-//        Batch storage batch_ = vote_.batches[_batchId];
-//        Batch storage anotherBatch_ = vote_.batches[_anotherBatchId];
-//        require(_proof.equal(batch_.proofHash) && _anotherProof.equal(anotherBatch_.proofHash), ERROR_CHALLENGE_REJECTED);
-//        require(_withinChallengeWindow(batch_) || _withinChallengeWindow(anotherBatch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
-//
-//        if (_proof.isValid()) {
-//            // if proof can be decoded
-//            if (_anotherProof.isValid()) {
-//                // if another proof can be decoded
-//                (bool invalidVote, bool anotherInvalidVote, bool duplication) = _isDoubleVoting(_voteId, _proof, _voteIndex, _anotherProof, _anotherVoteIndex);
-//
-//                if (invalidVote || anotherInvalidVote) {
-//                    // check if any vote couldn't be decoded
-//                    if (invalidVote) emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
-//                    else emit InvalidVote(_voteId, _anotherBatchId, _anotherProof, _anotherVoteIndex);
-//                    _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-//                } else {
-//                    // require duplication
-//                    require(duplication, ERROR_CHALLENGE_REJECTED);
-//                    emit VoteDuplication(_voteId, _batchId, _anotherBatchId, _proof, _anotherProof, _voteIndex, _anotherVoteIndex);
-//                    _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-//                }
-//            } else {
-//                emit InvalidProof(_voteId, _anotherBatchId, _anotherProof);
-//                _rollbackBatchAndSlash(vote_, anotherBatch_, msg.sender);
-//            }
-//        } else {
-//            emit InvalidProof(_voteId, _batchId, _proof);
-//            _rollbackBatchAndSlash(vote_, batch_, msg.sender);
-//        }
-//    }
+    function challengeDuplication(uint256 _voteId, uint256 _previousBatchId, uint256 _currentBatchId, uint256 _previousVoteIndex, uint256 _currentVoteIndex, bytes _previousProof, bytes _currentProof) external batchExists(_voteId, _previousBatchId) batchExists(_voteId, _currentBatchId) {
+        Batch storage currentBatch_ = votes[_voteId].batches[_currentBatchId];
+
+        require(_previousBatchId != _currentBatchId, ERROR_CHALLENGE_REJECTED);
+        require(_currentProof.equal(currentBatch_.proofHash), ERROR_CHALLENGE_REJECTED);
+        require(_currentProof.isValidIndex(_currentVoteIndex), ERROR_CHALLENGE_REJECTED);
+        require(_withinChallengeWindow(currentBatch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+
+        // must rollback on an invalid previous vote, cannot perform any checks with it :/
+        require(_canVerifyBatch(_voteId, _previousBatchId, _previousProof, _previousVoteIndex), ERROR_CHALLENGE_REJECTED);
+
+        if (_isInvalidVote(_voteId, _currentProof, _currentVoteIndex)) {
+            emit InvalidVote(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
+            return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
+        }
+        if (_isDoubleVoting(_voteId, _previousProof, _previousVoteIndex, _currentProof, _currentVoteIndex)) {
+            // TODO: emit single event - this is a hack to avoid stack level too deep error
+            emit VoteDuplication(_voteId, _previousBatchId, _previousProof, _previousVoteIndex);
+            emit VoteDuplication(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
+            return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
+        }
+
+        require(false, ERROR_CHALLENGE_REJECTED);
+    }
 
     /**
     * @notice Execute vote #`_voteId`
@@ -475,11 +452,43 @@ contract Voting is IForwarder, AragonApp {
         return _batchId < vote_.batchesLength;
     }
 
-    function _rollbackBatchAndSlash(Vote storage vote_, Batch storage batch_, address rewarded) internal {
+    function _rollbackBatchAndSlash(uint256 _voteId, Batch storage batch_, address rewarded) internal {
         batch_.valid = false;
+        Vote storage vote_ = votes[_voteId];
         vote_.yea = vote_.yea.sub(batch_.yea);
         vote_.nay = vote_.nay.sub(batch_.nay);
         require(collateralToken.transfer(rewarded, slashingCost));
+    }
+
+    /**
+    * @dev Checks whether a vote of a given proof is valid or not
+    * @return true if the given vote is not valid
+    */
+    function _isInvalidVote(uint256 _voteId, bytes _proof, uint256 _voteIndex) internal view returns (bool) {
+        if (!_proof.isValidVote(_voteIndex)) return true;
+        RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
+        if (!vote.belongsTo(_identifier(), _voteId)) return true;
+    }
+
+    /**
+    * @dev Checks whether a vote stake in a batch was valid or not
+    * @return true if the given vote stake was incorrect
+    */
+    function _isInvalidStake(uint256 _voteId, bytes _proof, uint256 _voteIndex) internal view returns (bool) {
+        RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
+        address voter = vote.voter();
+        uint256 voterBalance = token.balanceOfAt(voter, votes[_voteId].snapshotBlock);
+        return voterBalance != vote.stake();
+    }
+
+    /**
+    * @dev Checks whether a vote was included in two batches based on given proofs
+    * @return true if the given proofs are valid and the vote was duplicated
+    */
+    function _isDoubleVoting(uint256 _voteId, bytes _proof, uint256 _voteIndex, bytes _anotherProof, uint256 _anotherVoteIndex) internal pure returns (bool) {
+        RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
+        RLP.RLPItem[] memory anotherVote = _anotherProof.voteAt(_anotherVoteIndex);
+        return vote.voter() == anotherVote.voter();
     }
 
     /**
@@ -489,25 +498,23 @@ contract Voting is IForwarder, AragonApp {
     * - Tally of all votes adds up
     * @return true if the given proof is valid and the tally was incorrect
     */
-    function _isInvalidAggregation(uint256 _voteId, Batch storage batch_, bytes _proof) internal returns (bool invalidVote, uint256 invalidVoteIndex, bool invalidAggregation) {
+    function _isInvalidAggregation(uint256 _voteId, Batch storage batch_, bytes _proof) internal view returns (bool invalidVote, uint256 invalidVoteIndex, bool invalidAggregation) {
         uint256 yeas;
         uint256 nays;
         RLP.RLPItem[] memory votes_ = _proof.votes();
 
+        // TODO: verify proof does not exceeds max batch size
         for (uint256 i = 0; i < votes_.length; i++) {
-            // returns true if item is not a casted vote
-            if (!votes_.isValidVote(i)) return (true, i, false);
+            // returns invalid vote if item cannot be decoded
+            if (_isInvalidVote(_voteId, _proof, i)) return (true, i, false);
             RLP.RLPItem[] memory vote = votes_.voteAt(i);
 
-            // returns true if casted vote belongs to another vote
-            if (!vote.belongsTo(_identifier(), _voteId)) return (true, i, false);
-
-            // returns true if voter is duplicated
-            address voter = vote.voter();
             // TODO: implement (find a hack to avoid memory mappings - not supported yet)
+            // returns true if voter is duplicated
+            // address voter = vote.voter();
             // if (visitedVoters[voter]) return (true, i, false);
-
             // visitedVoters[voter] = true;
+
             if (vote.supports()) yeas = yeas.add(vote.stake());
             else nays = nays.add(vote.stake());
         }
@@ -516,52 +523,12 @@ contract Voting is IForwarder, AragonApp {
         return (false, 0, yeas != batch_.yea || nays != batch_.nay);
     }
 
-    /**
-    * @dev Checks whether a vote in a batch was valid or not
-    * - Validate casted vote app and vote ID
-    * - Validate voter signature
-    * - Validate voter balance
-    * @return true if the given proof is valid and the vote stake was incorrect
-    */
-    function _isInvalidStake(uint256 _voteId, bytes _proof, uint256 _voteIndex) internal returns (bool invalidVote, bool invalidStake) {
-        // returns false if given index is not valid
-        if (!_proof.isValidIndex(_voteIndex)) return (false, false);
-
-        // returns invalid vote if item cannot be decoded
-        if (!_proof.isValidVote(_voteIndex)) return (true, false);
-
-        // returns invalid vote if casted vote belongs to another vote or voting app
-        RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
-        if (!vote.belongsTo(_identifier(), _voteId)) return (true, false);
-
-        // returns valid vote and if voter balances don't match
-        address voter = vote.voter();
-        // TODO: is it necessary to use `TokenStorageProofs` instead?
-        uint256 voterBalance = token.balanceOfAt(voter, votes[_voteId].snapshotBlock);
-        return (false, voterBalance != vote.stake());
-    }
-
-    /**
-    * @dev Checks whether a vote was included in two batches based on given proofs
-    * @return true if the given proofs are valid and the vote was duplicated
-    */
-    function _isDoubleVoting(uint256 _voteId, bytes _proof, uint256 _voteIndex, bytes _anotherProof, uint256 _anotherVoteIndex) internal returns (bool invalidVote, bool anotherInvalidVote, bool duplication) {
-        // returns false if given indexes are not valid
-        if (!_proof.isValidIndex(_voteIndex)) return (false, false, false);
-        if (!_anotherProof.isValidIndex(_anotherVoteIndex)) return (false, false, false);
-
-        // returns invalid votes if items cannot be decoded
-        if (!_proof.isValidVote(_voteIndex)) return (true, false, false);
-        if (!_anotherProof.isValidVote(_anotherVoteIndex)) return (false, true, false);
-
-        // returns invalid vote if casted votes belong to another vote or voting app
-        RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
-        if (!vote.belongsTo(_identifier(), _voteId)) return (true, false, false);
-        RLP.RLPItem[] memory anotherVote = _anotherProof.voteAt(_anotherVoteIndex);
-        if (!anotherVote.belongsTo(_identifier(), _voteId)) return (false, true, false);
-
-        // returns valid votes and if voters match
-        return (false, false, vote.voter() == anotherVote.voter());
+    function _canVerifyBatch(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex) internal view returns (bool) {
+        Batch memory _batch = votes[_voteId].batches[_batchId];
+        if (!_proof.equal(_batch.proofHash)) return false;
+        if (!_proof.isValidIndex(_voteIndex)) return false;
+        if (_isInvalidVote(_voteId, _proof, _voteIndex)) return false;
+        return true;
     }
 
     function _identifier() internal view returns (bytes4) {

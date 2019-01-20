@@ -1,6 +1,6 @@
 const BN = web3.BigNumber
 const SVRP = require('../../../lib/SVRP')
-const { sign } = require('../../../lib/sign')
+const { sign } = require('../../../lib/sign')(web3)
 
 const ECDSAMock = artifacts.require('ECDSAMock')
 

@@ -1,10 +1,11 @@
 const BN = web3.BigNumber
 const RLP = require('rlp')
 const SVRP = require('../../lib/SVRP')
-const { sign } = require('../../lib/sign')
+const { sign } = require('../../lib/sign')(web3)
+const { soliditySha3 } = require('web3-utils')
 
 contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingAddress]) => {
-    const MESSAGE = web3.sha3('SVRP');
+    const MESSAGE = soliditySha3('SVRP')
 
     describe('encode', function () {
         context('with a single vote', function () {
