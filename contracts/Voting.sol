@@ -505,17 +505,15 @@ contract Voting is IForwarder, AragonApp {
         uint256 nays;
         RLP.RLPItem[] memory votes_ = _proof.votes();
 
-        // TODO: verify proof does not exceeds max batch size
+        address previousAddress = address(0);
         for (uint256 i = 0; i < votes_.length; i++) {
-            // returns invalid vote if item cannot be decoded
+            // returns invalid vote if item cannot be decoded or duplicated
             if (_isInvalidVote(_voteId, _proof, i)) return (true, i, false);
             RLP.RLPItem[] memory vote = votes_.voteAt(i);
+            address voter = vote.voter();
+            if (voter <= previousAddress) return (true, i, false);
 
-            // TODO: implement (find a hack to avoid memory mappings - not supported yet)
-            // returns true if voter is duplicated
-            // address voter = vote.voter();
-            // if (visitedVoters[voter]) return (true, i, false);
-            // visitedVoters[voter] = true;
+            previousAddress = voter;
 
             if (vote.supports()) yeas = yeas.add(vote.stake());
             else nays = nays.add(vote.stake());

@@ -30,10 +30,13 @@ const voteDuplicationEvent = (receipt, i = 0) => receipt.logs.filter(x => x.even
 const NULL_ADDRESS = '0x00'
 const ANY_ADDRESS = '0xffffffffffffffffffffffffffffffffffffffff'
 
-contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, nonHolder, relayer]) => {
+contract('Voting app', accounts => {
     const VOTING_TIME = 1000
     const SLASHING_COST = bigExp(1000, 18)
     const CHALLENGE_WINDOW_IN_SECONDS = 7 * 60 * 60 * 24 // 7 days
+
+    // we sort accounts to make testing easier since relayers must submit batches ordered
+    const [root, holder1, holder2, holder20, holder29, holder51, nonHolder, relayer] = accounts.sort()
 
     let daoFactory, votingBase, voting, votingAddress, voteId, batchId, relayerBalance, script, token, collateralToken, executionTarget
     let APP_MANAGER_ROLE, CREATE_VOTES_ROLE, SUBMIT_BATCH_ROLE, MODIFY_SUPPORT_ROLE, MODIFY_QUORUM_ROLE
@@ -543,8 +546,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                 })
                                             })
 
-                                            // TODO: fix validation in voting contract
-                                            xcontext('when there was a duplicated vote', function () {
+                                            context('when there was a duplicated vote', function () {
                                                 beforeEach('submit batch with duplicated vote', async function () {
                                                     submittedYeas = bigExp(58, decimals)
                                                     submittedNays = bigExp(0, decimals)
@@ -553,11 +555,12 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                                 it('accepts the challenge', async function () {
                                                     const receipt = await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
-                                                    const event = invalidAggregationEvent(receipt)
+                                                    const event = invalidVoteEvent(receipt)
 
                                                     assert.notEqual(event, null, 'event should exist')
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
+                                                    assert(event.voteIndex.eq(1), 'vote index should match')
                                                     assert.equal(event.proof, proofWithDuplicatedVote, 'proof should match')
                                                 })
 

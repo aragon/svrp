@@ -9,7 +9,7 @@ contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingA
 
     describe('encode', function () {
         context('with a single vote', function () {
-            const vote = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, signature: sign(voter1, MESSAGE) }
+            const vote = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, holder: voter1, signature: sign(voter1, MESSAGE) }
 
             it('encodes the votes as a buffer by default', function () {
                 const encode = SVRP.encode([vote])
@@ -29,15 +29,19 @@ contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingA
         })
 
         context('with multiple votes', function () {
-            const vote1 = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, signature: sign(voter1, MESSAGE) }
-            const vote2 = { votingAddress, voteId: 256, stake: new BN('15'), supports: true, signature: sign(voter2, MESSAGE) }
-            const vote3 = { votingAddress, voteId: 82913, stake: new BN('1243e18'), supports: false, signature: sign(voter3, MESSAGE) }
-            const vote4 = { votingAddress: anotherVotingAddress, voteId: 256, stake: new BN('15e18'), supports: false, signature: sign(voter4, MESSAGE) }
+            const vote1 = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, holder: voter1, signature: sign(voter1, MESSAGE) }
+            const vote2 = { votingAddress, voteId: 256, stake: new BN('15'), supports: true, holder: voter2, signature: sign(voter2, MESSAGE) }
+            const vote3 = { votingAddress, voteId: 82913, stake: new BN('1243e18'), supports: false, holder: voter3, signature: sign(voter3, MESSAGE) }
+            const vote4 = { votingAddress: anotherVotingAddress, voteId: 256, stake: new BN('15e18'), supports: false, holder: voter4, signature: sign(voter4, MESSAGE) }
 
             it('encodes it properly', function () {
-                const encode = SVRP.encode([vote1, vote2, vote3, vote4])
+                const votes = [vote1, vote2, vote3, vote4]
+                const encode = SVRP.encode(votes)
                 const decodedData = RLP.decode(encode)
 
+                assert(decodedData.length === 4)
+                const sortedVotes = votes.sort(SVRP._sortVotes)
+                for (const vote of sortedVotes) assertVote(decodedData[votes.indexOf(vote)], vote)
                 assert(decodedData.length === 4)
                 assertVote(decodedData[0], vote1)
                 assertVote(decodedData[1], vote2)
