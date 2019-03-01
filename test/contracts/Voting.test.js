@@ -31,8 +31,9 @@ const NULL_ADDRESS = '0x00'
 const ANY_ADDRESS = '0xffffffffffffffffffffffffffffffffffffffff'
 
 contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, nonHolder, relayer]) => {
-    const votingTime = 1000
-    const challengeWindowSeconds = 7 * 60 * 60 * 24 // 7 days
+    const VOTING_TIME = 1000
+    const SLASHING_COST = bigExp(1000, 18)
+    const CHALLENGE_WINDOW_IN_SECONDS = 7 * 60 * 60 * 24 // 7 days
 
     let daoFactory, votingBase, voting, votingAddress, voteId, batchId, relayerBalance, script, token, collateralToken, executionTarget
     let APP_MANAGER_ROLE, CREATE_VOTES_ROLE, SUBMIT_BATCH_ROLE, MODIFY_SUPPORT_ROLE, MODIFY_QUORUM_ROLE
@@ -126,7 +127,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
             const minimumAcceptanceQuorum = pct16(50)
 
             beforeEach('initialize voting instance', async function () {
-                await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, votingTime)
+                await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
             })
 
             it('has a token', async function () {
@@ -145,7 +146,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
             it('cannot be initialized twice', async function () {
                 return assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,neededSupport, minimumAcceptanceQuorum, votingTime)
+                    await voting.initialize(token.address, collateralToken.address,neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
             })
 
@@ -153,7 +154,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                 assert.isTrue(await votingBase.isPetrified())
 
                 return assertRevert(async function () {
-                    await votingBase.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, votingTime)
+                    await votingBase.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
             })
         })
@@ -164,7 +165,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                 const minimumAcceptanceQuorum = pct16(50)
 
                 return assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,neededSupport, minimumAcceptanceQuorum, votingTime)
+                    await voting.initialize(token.address, collateralToken.address,neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
             })
 
@@ -172,10 +173,10 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                 const minimumAcceptanceQuorum = pct16(20)
 
                 await assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,pct16(101), minimumAcceptanceQuorum, votingTime)
+                    await voting.initialize(token.address, collateralToken.address,pct16(101), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
                 return assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,pct16(100), minimumAcceptanceQuorum, votingTime)
+                    await voting.initialize(token.address, collateralToken.address,pct16(100), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
             })
         })
@@ -191,7 +192,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
             context(`with ${decimals} decimals`, () => {
                 beforeEach('initialize voting instance', async function () {
                     token = await MiniMeToken.new(NULL_ADDRESS, NULL_ADDRESS, 0, 'n', decimals, 'n', true) // empty parameters minime
-                    await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, votingTime)
+                    await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                     executionTarget = await ExecutionTarget.new()
                 })
 
@@ -358,7 +359,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                 context('when the vote is closed', function () {
                                     beforeEach('close vote', async function () {
-                                        await timeTravel(votingTime + 1)
+                                        await timeTravel(VOTING_TIME + 1)
                                     })
 
                                     it('returns false', async function () {
@@ -401,7 +402,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                     context('when the vote is closed', function () {
                                         beforeEach('close vote', async function () {
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         })
 
                                         it('reverts', async function () {
@@ -415,7 +416,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 context('when the vote is already executed', function () {
                                     beforeEach('execute vote', async function () {
                                         await voting.submitBatch(voteId, yeas, nays, proof, { from })
-                                        await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                        await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         await voting.executeVote(voteId)
                                     })
 
@@ -754,7 +755,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                 submittedYeas = bigExp(20, decimals)
                                                 submittedNays = bigExp(29, decimals)
                                                 batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
-                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                             })
 
                                             it('reverts', async  function () {
@@ -769,7 +770,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                 submittedYeas = bigExp(49, decimals)
                                                 submittedNays = bigExp(0, decimals)
                                                 batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
-                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                             })
 
                                             it('reverts', async  function () {
@@ -1040,7 +1041,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                 submittedYeas = bigExp(20, decimals)
                                                 submittedNays = bigExp(29, decimals)
                                                 batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
-                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                             })
 
                                             it('reverts', async  function () {
@@ -1055,7 +1056,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                 submittedYeas = bigExp(49, decimals)
                                                 submittedNays = bigExp(0, decimals)
                                                 batchId = submittedBatchId(await voting.submitBatch(voteId, submittedYeas, submittedNays, correctProof, { from: relayer }))
-                                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                             })
 
                                             it('reverts', async  function () {
@@ -1362,7 +1363,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                                             currentSubmittedNays = bigExp(0, decimals)
                                                             currentBatchId = submittedBatchId(await voting.submitBatch(voteId, currentSubmittedYeas, currentSubmittedNays, incorrectCurrentProof, { from: relayer }))
 
-                                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                                         })
 
                                                         it('reverts', async  function () {
@@ -1461,7 +1462,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                         beforeEach('submit batch with enough support', async function () {
                                             await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         })
 
                                         it('executes the vote', async function () {
@@ -1480,7 +1481,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                         beforeEach('submit batch without support', async function () {
                                             await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         })
 
                                         it('reverts', async function () {
@@ -1499,7 +1500,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                         beforeEach('submit batch with enough support', async function () {
                                             await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         })
 
                                         it('reverts', async function () {
@@ -1514,7 +1515,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
 
                                         beforeEach('submit batch without support', async function () {
                                             await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer })
-                                            await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                            await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
                                         })
 
                                         it('reverts', async function () {
@@ -1544,7 +1545,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 const yeas = bigExp(69, decimals)
                                 const nays = bigExp(10, decimals)
                                 await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
-                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
 
                                 const state = await voting.getVote(voteId)
                                 assert(state[4].eq(neededSupport), 'required support in vote should stay equal')
@@ -1566,7 +1567,7 @@ contract('Voting app', ([root, holder1, holder2, holder20, holder29, holder51, n
                                 const yeas = bigExp(29, decimals)
                                 const nays = bigExp(0, decimals)
                                 await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
-                                await timeTravel(votingTime + challengeWindowSeconds + 1)
+                                await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
 
                                 const state = await voting.getVote(voteId)
                                 assert(state[5].eq(minimumAcceptanceQuorum), 'acceptance quorum in vote should stay equal')

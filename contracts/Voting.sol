@@ -26,8 +26,6 @@ contract Voting is IForwarder, AragonApp {
     bytes32 public constant MODIFY_QUORUM_ROLE = keccak256("MODIFY_QUORUM_ROLE");
 
     uint64 public constant PCT_BASE = 10 ** 18; // 0% = 0; 1% = 10^16; 100% = 10^18
-
-    uint256 public constant SLASHING_COST = 1000;
     uint256 public constant CHALLENGE_WINDOW = 7 days;
 
     string private constant ERROR_NO_VOTE = "VOTING_NO_VOTE";
@@ -110,7 +108,8 @@ contract Voting is IForwarder, AragonApp {
         ERC20 _collateralToken,
         uint64 _supportRequiredPct,
         uint64 _minAcceptQuorumPct,
-        uint64 _voteTime
+        uint64 _voteTime,
+        uint256 _slashingCost
     )
         external
         onlyInit
@@ -125,7 +124,7 @@ contract Voting is IForwarder, AragonApp {
         supportRequiredPct = _supportRequiredPct;
         minAcceptQuorumPct = _minAcceptQuorumPct;
         voteTime = _voteTime;
-        slashingCost = SLASHING_COST.mul(10 ** 18); // TODO: we are assuming the collateral token has 18 decimals
+        slashingCost = _slashingCost;
     }
 
     /**
@@ -188,15 +187,15 @@ contract Voting is IForwarder, AragonApp {
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
         require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
 
-        (bool invalidVote, uint256 voteIndex, bool invalidAggregation) = _isInvalidAggregation(_voteId, batch_, _proof);
+        (bool invalidVote, uint256 voteIndex, bool invalidAggregation) = _isInvalidAggregation(_voteId, _batchId, _proof);
 
         if (invalidVote) {
             emit InvalidVote(_voteId, _batchId, _proof, voteIndex);
-            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
         if (invalidAggregation) {
             emit InvalidAggregation(_voteId, _batchId, _proof);
-            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
 
         revert(ERROR_CHALLENGE_REJECTED);
@@ -214,11 +213,11 @@ contract Voting is IForwarder, AragonApp {
 
         if (_isInvalidVote(_voteId, _proof, _voteIndex)) {
             emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
-            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
         if (_isInvalidStake(_voteId, _proof, _voteIndex)) {
             emit InvalidVoteStake(_voteId, _batchId, _proof, _voteIndex);
-            return _rollbackBatchAndSlash(_voteId, batch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
 
         revert(ERROR_CHALLENGE_REJECTED);
@@ -240,13 +239,13 @@ contract Voting is IForwarder, AragonApp {
 
         if (_isInvalidVote(_voteId, _currentProof, _currentVoteIndex)) {
             emit InvalidVote(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
-            return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _currentBatchId, msg.sender);
         }
         if (_isDoubleVoting(_previousProof, _previousVoteIndex, _currentProof, _currentVoteIndex)) {
             // TODO: emit single event - this is a hack to avoid stack level too deep error
             emit VoteDuplication(_voteId, _previousBatchId, _previousProof, _previousVoteIndex);
             emit VoteDuplication(_voteId, _currentBatchId, _currentProof, _currentVoteIndex);
-            return _rollbackBatchAndSlash(_voteId, currentBatch_, msg.sender);
+            return _rollbackBatchAndPayOutReward(_voteId, _currentBatchId, msg.sender);
         }
 
         revert(ERROR_CHALLENGE_REJECTED);
@@ -284,7 +283,7 @@ contract Voting is IForwarder, AragonApp {
 
     function canSubmit(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
-        bool isOpen = _isVoteOpen(vote_);
+        bool isOpen = _isVoteOpen(_voteId);
         bool hasEnoughBalanceToPayChallenges = collateralToken.balanceOf(this) >= slashingCost.mul(vote_.batchesLength.add(1));
         return isOpen && hasEnoughBalanceToPayChallenges;
     }
@@ -310,7 +309,7 @@ contract Voting is IForwarder, AragonApp {
         uint256 totalVotes = vote_.yea.add(vote_.nay);
 
         // Vote ended?
-        if (_isVoteOpen(vote_)) {
+        if (_isVoteOpen(_voteId)) {
             return false;
         }
         // Has enough support?
@@ -343,7 +342,7 @@ contract Voting is IForwarder, AragonApp {
         )
     {
         Vote storage vote_ = votes[_voteId];
-        open = _isVoteOpen(vote_);
+        open = _isVoteOpen(_voteId);
         executed = vote_.executed;
         startDate = vote_.startDate;
         snapshotBlock = vote_.snapshotBlock;
@@ -422,7 +421,8 @@ contract Voting is IForwarder, AragonApp {
         emit ExecuteVote(_voteId);
     }
 
-    function _isVoteOpen(Vote storage vote_) internal view returns (bool) {
+    function _isVoteOpen(uint256 _voteId) internal view returns (bool) {
+        Vote storage vote_ = votes[_voteId];
         return getTimestamp64() < vote_.startDate.add(voteTime) && !vote_.executed;
     }
 
@@ -452,9 +452,11 @@ contract Voting is IForwarder, AragonApp {
         return _batchId < vote_.batchesLength;
     }
 
-    function _rollbackBatchAndSlash(uint256 _voteId, Batch storage batch_, address rewarded) internal {
-        batch_.valid = false;
+    function _rollbackBatchAndPayOutReward(uint256 _voteId, uint256 _batchId, address rewarded) internal {
         Vote storage vote_ = votes[_voteId];
+        Batch storage batch_ = vote_.batches[_batchId];
+
+        batch_.valid = false;
         vote_.yea = vote_.yea.sub(batch_.yea);
         vote_.nay = vote_.nay.sub(batch_.nay);
         require(collateralToken.transfer(rewarded, slashingCost));
@@ -498,7 +500,7 @@ contract Voting is IForwarder, AragonApp {
     * - Tally of all votes adds up
     * @return true if the given proof is valid and the tally was incorrect
     */
-    function _isInvalidAggregation(uint256 _voteId, Batch storage batch_, bytes _proof) internal view returns (bool invalidVote, uint256 invalidVoteIndex, bool invalidAggregation) {
+    function _isInvalidAggregation(uint256 _voteId, uint256 _batchId, bytes _proof) internal view returns (bool invalidVote, uint256 invalidVoteIndex, bool invalidAggregation) {
         uint256 yeas;
         uint256 nays;
         RLP.RLPItem[] memory votes_ = _proof.votes();
@@ -520,12 +522,13 @@ contract Voting is IForwarder, AragonApp {
         }
 
         // returns valid vote and if tally totals don't add up
+        Batch storage batch_ = votes[_voteId].batches[_batchId];
         return (false, 0, yeas != batch_.yea || nays != batch_.nay);
     }
 
     function _canVerifyBatch(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex) internal view returns (bool) {
-        Batch memory _batch = votes[_voteId].batches[_batchId];
-        if (!_proof.equal(_batch.proofHash)) return false;
+        Batch storage batch_ = votes[_voteId].batches[_batchId];
+        if (!_proof.equal(batch_.proofHash)) return false;
         if (!_proof.isValidIndex(_voteIndex)) return false;
         if (_isInvalidVote(_voteId, _proof, _voteIndex)) return false;
         return true;
