@@ -1,17 +1,15 @@
-const BN = web3.BigNumber
 const RLP = require('rlp')
-const SVRP = require('../../lib/SVRP')
-const { sign } = require('../../lib/sign')(web3)
-const { soliditySha3 } = require('web3-utils')
+const SVRP = require('../../lib/models/SVRP')
+const { signVote } = require('../../lib/helpers/sign')(web3)
+const { bn, stake } = require('../../lib/helpers/numbers')
 
 contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingAddress]) => {
-    const MESSAGE = soliditySha3('SVRP')
-
     describe('encode', function () {
         context('with a single vote', function () {
-            const vote = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, holder: voter1, signature: sign(voter1, MESSAGE) }
 
-            it('encodes the votes as a buffer by default', function () {
+            it('encodes the votes as a buffer by default', async function () {
+                const vote = await signVote(voter1, { votingAddress, voteId: 1, stake: stake(15), supports: true })
+
                 const encode = SVRP.encode([vote])
                 const decodedData = RLP.decode(encode)
 
@@ -19,7 +17,9 @@ contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingA
                 assertVote(decodedData[0], vote)
             })
 
-            it('encodes the votes in hex encoding', function () {
+            it('encodes the votes in hex encoding', async function () {
+                const vote = await signVote(voter1, { votingAddress, voteId: 1, stake: stake(15), supports: true })
+
                 const encode = SVRP.encode([vote], 'hex')
                 const decodedData = RLP.decode(Buffer.from(encode, 'hex'))
 
@@ -29,12 +29,12 @@ contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingA
         })
 
         context('with multiple votes', function () {
-            const vote1 = { votingAddress, voteId: 1, stake: new BN('15e18'), supports: true, holder: voter1, signature: sign(voter1, MESSAGE) }
-            const vote2 = { votingAddress, voteId: 256, stake: new BN('15'), supports: true, holder: voter2, signature: sign(voter2, MESSAGE) }
-            const vote3 = { votingAddress, voteId: 82913, stake: new BN('1243e18'), supports: false, holder: voter3, signature: sign(voter3, MESSAGE) }
-            const vote4 = { votingAddress: anotherVotingAddress, voteId: 256, stake: new BN('15e18'), supports: false, holder: voter4, signature: sign(voter4, MESSAGE) }
+            it('encodes it properly', async function () {
+                const vote1 = await signVote(voter1, { votingAddress, voteId: 1, stake: stake(15), supports: true })
+                const vote2 = await signVote(voter2, { votingAddress, voteId: 256, stake: bn(15), supports: true })
+                const vote3 = await signVote(voter3, { votingAddress, voteId: 82913, stake: stake(1243), supports: false })
+                const vote4 = await signVote(voter4, { votingAddress: anotherVotingAddress, voteId: 256, stake: stake(15), supports: false })
 
-            it('encodes it properly', function () {
                 const votes = [vote1, vote2, vote3, vote4]
                 const encode = SVRP.encode(votes)
                 const decodedData = RLP.decode(encode)
@@ -42,26 +42,21 @@ contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingA
                 assert(decodedData.length === 4)
                 const sortedVotes = votes.sort(SVRP._sortVotes)
                 for (const vote of sortedVotes) assertVote(decodedData[votes.indexOf(vote)], vote)
-                assert(decodedData.length === 4)
-                assertVote(decodedData[0], vote1)
-                assertVote(decodedData[1], vote2)
-                assertVote(decodedData[2], vote3)
-                assertVote(decodedData[3], vote4)
             })
         })
     })
 
     function assertVote(data, vote) {
-        const expectedVotingId = data[0].toString('hex')
+        const expectedVotingId = `0x${data[0].toString('hex')}`
         const expectedVoteId = parseInt(`0x${data[1].toString('hex')}`)
         const expectedSupport = parseInt(`0x${data[2].toString('hex')}`)
-        const expectedStake = new BN(`0x${data[3].toString('hex')}`)
+        const expectedStake = bn(data[3], 16)
         const expectedSignature = `0x${data[4].toString('hex')}`
 
-        assert(vote.votingAddress.substring(2, 10), expectedVotingId)
-        assert(vote.voteId, expectedVoteId)
+        assert.equal(vote.votingId, expectedVotingId)
+        assert.equal(vote.voteId, expectedVoteId)
         assert((vote.supports && expectedSupport === 1) || (!vote.supports && expectedSupport === 0))
         assert(vote.stake.eq(expectedStake))
-        assert(vote.signature, expectedSignature)
+        assert.equal(vote.signature, expectedSignature)
     }
 })

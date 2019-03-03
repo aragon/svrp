@@ -1,8 +1,8 @@
-const BN = web3.BigNumber
-const SVRP = require('../../lib/SVRP')
-const { signVote } = require('../../lib/sign')(web3)
+const SVRP = require('../../lib/models/SVRP')
+const { signVote } = require('../../lib/helpers/sign')(web3)
+const { bn, pct, bigExp } = require('../../lib/helpers/numbers')
 
-const timeTravel = require('@aragon/test-helpers/timeTravel')(web3)
+const timeTravel = require('../../lib/helpers/timeTravel')(web3)
 const getBlockNumber = require('@aragon/test-helpers/blockNumber')(web3)
 const { assertRevert } = require('@aragon/test-helpers/assertThrow')
 const { encodeCallScript, EMPTY_SCRIPT } = require('@aragon/test-helpers/evmScript')
@@ -15,8 +15,6 @@ const DAOFactory = artifacts.require('@aragon/os/contracts/factory/DAOFactory')
 const MiniMeToken = artifacts.require('@aragon/apps-shared-minime/contracts/MiniMeToken')
 const EVMScriptRegistryFactory = artifacts.require('@aragon/os/contracts/factory/EVMScriptRegistryFactory')
 
-const pct16 = x => bigExp(x, 16)
-const bigExp = (x, y) => new BN(x).times(new BN(10).toPower(y))
 const getContract = name => artifacts.require(name)
 const createdVoteId = receipt => startVoteEvent(receipt).voteId
 const submittedBatchId = receipt => submitBatchEvent(receipt).batchId
@@ -27,8 +25,8 @@ const invalidVoteStakeEvent = receipt => receipt.logs.filter(x => x.event === 'I
 const invalidAggregationEvent = receipt => receipt.logs.filter(x => x.event === 'InvalidAggregation')[0].args
 const voteDuplicationEvent = (receipt, i = 0) => receipt.logs.filter(x => x.event === 'VoteDuplication')[i].args
 
-const NULL_ADDRESS = '0x00'
 const ANY_ADDRESS = '0xffffffffffffffffffffffffffffffffffffffff'
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 contract('Voting app', accounts => {
     const VOTING_TIME = 1000
@@ -58,14 +56,14 @@ contract('Voting app', accounts => {
 
     beforeEach('create permissions', async function () {
         const { logs } = await daoFactory.newDAO(root)
-        const dao = Kernel.at(logs.filter(l => l.event === 'DeployDAO')[0].args.dao)
-        const acl = ACL.at(await dao.acl())
+        const dao = await Kernel.at(logs.filter(l => l.event === 'DeployDAO')[0].args.dao)
+        const acl = await ACL.at(await dao.acl())
 
         await acl.createPermission(root, dao.address, APP_MANAGER_ROLE, root, { from: root })
 
         const { logs: logs2 } = await dao.newAppInstance('0x1234', votingBase.address, '0x', false, { from: root })
         votingAddress = logs2.filter(l => l.event === 'NewAppProxy')[0].args.proxy;
-        voting = Voting.at(votingAddress)
+        voting = await Voting.at(votingAddress)
 
         await acl.createPermission(relayer, votingAddress, SUBMIT_BATCH_ROLE, root, { from: root })
         await acl.createPermission(ANY_ADDRESS, votingAddress, CREATE_VOTES_ROLE, root, { from: root })
@@ -76,7 +74,7 @@ contract('Voting app', accounts => {
     beforeEach('initialize collateral token', async function () {
         const decimals = 18
         relayerBalance = bigExp(2000, decimals)
-        collateralToken = await MiniMeToken.new(NULL_ADDRESS, NULL_ADDRESS, 0, 'n', decimals, 'n', true) // empty parameters minime
+        collateralToken = await MiniMeToken.new(ZERO_ADDRESS, ZERO_ADDRESS, 0, 'n', decimals, 'n', true) // empty parameters minime
         await collateralToken.generateTokens(voting.address, relayerBalance)
     })
 
@@ -88,15 +86,15 @@ contract('Voting app', accounts => {
 
     describe('isValuePct', function () {
         it('tests total = 0', async function () {
-            const result1 = await voting.isValuePct(0, 0, pct16(50))
+            const result1 = await voting.isValuePct(0, 0, pct(50))
             assert.equal(result1, false, "total 0 should always return false")
 
-            const result2 = await voting.isValuePct(1, 0, pct16(50))
+            const result2 = await voting.isValuePct(1, 0, pct(50))
             assert.equal(result2, false, "total 0 should always return false")
         })
 
         it('tests value = 0', async function () {
-            const result1 = await voting.isValuePct(0, 10, pct16(50))
+            const result1 = await voting.isValuePct(0, 10, pct(50))
             assert.equal(result1, false, "value 0 should false if pct is non-zero")
 
             const result2 = await voting.isValuePct(0, 10, 0)
@@ -104,30 +102,30 @@ contract('Voting app', accounts => {
         })
 
         it('tests pct ~= 100', async function () {
-            const result1 = await voting.isValuePct(10, 10, pct16(100).minus(1))
+            const result1 = await voting.isValuePct(10, 10, pct(100).sub(bn(1)))
             assert.equal(result1, true, "value 10 over 10 should pass")
         })
 
         it('tests strict inequality', async function () {
-            const result1 = await voting.isValuePct(10, 20, pct16(50))
+            const result1 = await voting.isValuePct(10, 20, pct(50))
             assert.equal(result1, false, "value 10 over 20 should not pass for 50%")
 
-            const result2 = await voting.isValuePct(pct16(50).minus(1), pct16(100), pct16(50))
+            const result2 = await voting.isValuePct(pct(50).sub(bn(1)), pct(100), pct(50))
             assert.equal(result2, false, "off-by-one down should not pass")
 
-            const result3 = await voting.isValuePct(pct16(50).plus(1), pct16(100), pct16(50))
+            const result3 = await voting.isValuePct(pct(50).add(bn(1)), pct(100), pct(50))
             assert.equal(result3, true, "off-by-one up should pass")
         })
     })
 
     context('when the voting is not initialized', function () {
         beforeEach('create minime instance', async function () {
-            token = await MiniMeToken.new(NULL_ADDRESS, NULL_ADDRESS, 0, 'n', 0, 'n', true) // empty parameters minime
+            token = await MiniMeToken.new(ZERO_ADDRESS, ZERO_ADDRESS, 0, 'n', 0, 'n', true) // empty parameters minime
         })
 
         context('when using valid percentages', function () {
-            const neededSupport = pct16(60)
-            const minimumAcceptanceQuorum = pct16(50)
+            const neededSupport = pct(60)
+            const minimumAcceptanceQuorum = pct(50)
 
             beforeEach('initialize voting instance', async function () {
                 await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
@@ -144,7 +142,7 @@ contract('Voting app', accounts => {
 
             it('has a collateral token and a slashing cost of 1000 tokens', async function () {
                 assert.equal(await voting.collateralToken(), collateralToken.address, 'collateral token should match')
-                assert((await voting.slashingCost()).eq(new BN('1000e18')), 'slashing cost should be 1000 tokens')
+                assert((await voting.slashingCost()).eq(bigExp(1000, 18)), 'slashing cost should be 1000 tokens')
             })
 
             it('cannot be initialized twice', async function () {
@@ -164,8 +162,8 @@ contract('Voting app', accounts => {
 
         context('when using invalid percentages', function () {
             it('fails if min acceptance quorum is greater than min support', async function () {
-                const neededSupport = pct16(20)
-                const minimumAcceptanceQuorum = pct16(50)
+                const neededSupport = pct(20)
+                const minimumAcceptanceQuorum = pct(50)
 
                 return assertRevert(async function () {
                     await voting.initialize(token.address, collateralToken.address,neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
@@ -173,28 +171,28 @@ contract('Voting app', accounts => {
             })
 
             it('fails if min support is 100% or more', async function () {
-                const minimumAcceptanceQuorum = pct16(20)
+                const minimumAcceptanceQuorum = pct(20)
 
                 await assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,pct16(101), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
+                    await voting.initialize(token.address, collateralToken.address,pct(101), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
                 return assertRevert(async function () {
-                    await voting.initialize(token.address, collateralToken.address,pct16(100), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
+                    await voting.initialize(token.address, collateralToken.address,pct(100), minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                 })
             })
         })
     })
 
     context('when the voting is initialized', function () {
-        const neededSupport = pct16(50)             // yeas must be greater than the 50% of the total votes
-        const minimumAcceptanceQuorum = pct16(20)   // yeas must be greater than the 20% of the voting power
+        const neededSupport = pct(50)             // yeas must be greater than the 50% of the total votes
+        const minimumAcceptanceQuorum = pct(20)   // yeas must be greater than the 20% of the voting power
 
         // TODO: solve not enough funds issue to run different decimals scenarios
         // for (const decimals of [0, 2, 18, 26]) {
         for (const decimals of [0]) {
             context(`with ${decimals} decimals`, () => {
                 beforeEach('initialize voting instance', async function () {
-                    token = await MiniMeToken.new(NULL_ADDRESS, NULL_ADDRESS, 0, 'n', decimals, 'n', true) // empty parameters minime
+                    token = await MiniMeToken.new(ZERO_ADDRESS, ZERO_ADDRESS, 0, 'n', decimals, 'n', true) // empty minime parameters
                     await voting.initialize(token.address, collateralToken.address, neededSupport, minimumAcceptanceQuorum, VOTING_TIME, SLASHING_COST)
                     executionTarget = await ExecutionTarget.new()
                 })
@@ -212,25 +210,25 @@ contract('Voting app', accounts => {
 
                     describe('changeRequiredSupport', function () {
                         it('can change required support', async function () {
-                            const receipt = await voting.changeSupportRequiredPct(neededSupport.add(1))
+                            const receipt = await voting.changeSupportRequiredPct(neededSupport.add(bn(1)))
                             const events = receipt.logs.filter(x => x.event === 'ChangeSupportRequired')
 
                             assert.equal(events.length, 1, 'should have emitted ChangeSupportRequired event')
-                            assert.equal((await voting.supportRequiredPct()).toString(), neededSupport.add(1).toString(), 'should have changed required support')
+                            assert.equal((await voting.supportRequiredPct()).toString(), neededSupport.add(bn(1)).toString(), 'should have changed required support')
                         })
 
                         it('fails changing required support lower than minimum acceptance quorum', async function () {
                             return assertRevert(async function () {
-                                await voting.changeSupportRequiredPct(minimumAcceptanceQuorum.minus(1))
+                                await voting.changeSupportRequiredPct(minimumAcceptanceQuorum.sub(bn(1)))
                             })
                         })
 
                         it('fails changing required support to 100% or more', async function () {
                             await assertRevert(async () => {
-                                await voting.changeSupportRequiredPct(pct16(101))
+                                await voting.changeSupportRequiredPct(pct(101))
                             })
                             return assertRevert(async () => {
-                                await voting.changeSupportRequiredPct(pct16(100))
+                                await voting.changeSupportRequiredPct(pct(100))
                             })
                         })
                     })
@@ -246,7 +244,7 @@ contract('Voting app', accounts => {
 
                         it('fails changing minimum acceptance quorum to greater than min support', async function () {
                             return assertRevert(async () => {
-                                await voting.changeMinAcceptQuorumPct(neededSupport.plus(1))
+                                await voting.changeMinAcceptQuorumPct(neededSupport.add(bn(1)))
                             })
                         })
                     })
@@ -257,19 +255,19 @@ contract('Voting app', accounts => {
 
                             context('when the script is not empty', function () {
                                 it('creates a vote', async function () {
-                                    const action = { to: executionTarget.address, calldata: executionTarget.contract.execute.getData() }
+                                    const action = { to: executionTarget.address, calldata: executionTarget.contract.methods.execute()._method.signature }
                                     const script = encodeCallScript([action, action])
                                     const receipt = await voting.newVote(script, 'metadata', { from })
 
                                     const event = startVoteEvent(receipt)
                                     assert.notEqual(event, null)
-                                    assert(event.voteId.eq(0))
+                                    assert(event.voteId.eq(bn(0)))
                                     assert.equal(event.creator, from)
                                     assert.equal(event.metadata, 'metadata')
                                 })
 
                                 it('does not execute the script', async function () {
-                                    const action = { to: executionTarget.address, calldata: executionTarget.contract.execute.getData() }
+                                    const action = { to: executionTarget.address, calldata: executionTarget.contract.methods.execute()._method.signature }
                                     const script = encodeCallScript([action])
                                     await voting.newVote(script, '', { from })
 
@@ -285,7 +283,7 @@ contract('Voting app', accounts => {
 
                                     const event = startVoteEvent(receipt)
                                     assert.notEqual(event, null)
-                                    assert(event.voteId.eq(0))
+                                    assert(event.voteId.eq(bn(0)))
                                     assert.equal(event.creator, from)
                                     assert.equal(event.metadata, 'metadata')
                                 })
@@ -294,7 +292,7 @@ contract('Voting app', accounts => {
 
                         describe('forward', function () {
                             it('creates vote', async function () {
-                                const action = { to: executionTarget.address, calldata: executionTarget.contract.execute.getData() }
+                                const action = { to: executionTarget.address, calldata: executionTarget.contract.methods.execute()._method.signature }
                                 const script = encodeCallScript([action])
                                 const voteId = createdVoteId(await voting.forward(script, { from: holder51 }))
 
@@ -305,26 +303,23 @@ contract('Voting app', accounts => {
 
                     context('when there is an existing vote', function () {
                         beforeEach('create vote', async function () {
-                            const action = { to: executionTarget.address, calldata: executionTarget.contract.execute.getData() }
+                            const action = { to: executionTarget.address, calldata: executionTarget.contract.methods.execute()._method.signature }
                             script = encodeCallScript([action, action])
                             voteId = createdVoteId(await voting.newVote(script, 'metadata', { from: holder20 }))
-
-                            const state = await voting.getVote(voteId)
-                            const snapshotBlock = state[3]
                         })
 
                         describe('getVote', function () {
                             context('when the given ID is valid', async function () {
                                 it('fetches the requested vote', async function () {
-                                    const [isOpen, isExecuted, _, snapshotBlock, supportRequired, minQuorum, y, n, votingPower, execScript] = await voting.getVote(voteId)
+                                    const { open, executed, snapshotBlock, supportRequired, minAcceptQuorum, yea, nay, votingPower, script: execScript } = await voting.getVote(voteId)
 
-                                    assert.isTrue(isOpen, 'vote should be open')
-                                    assert.isFalse(isExecuted, 'vote should not be executed')
+                                    assert.isTrue(open, 'vote should be open')
+                                    assert.isFalse(executed, 'vote should not be executed')
                                     assert.equal(snapshotBlock, await getBlockNumber() - 1, 'snapshot block should be correct')
-                                    assert.equal(supportRequired.toNumber(), neededSupport.toNumber(), 'required support should be app required support')
-                                    assert.equal(minQuorum.toNumber(), minimumAcceptanceQuorum.toNumber(), 'min quorum should be app min quorum')
-                                    assert.equal(y, 0, 'initial yea should be 0')
-                                    assert.equal(n, 0, 'initial nay should be 0')
+                                    assert(supportRequired.eq(neededSupport), 'required support should be app required support')
+                                    assert(minAcceptQuorum.eq(minimumAcceptanceQuorum), 'min quorum should be app min quorum')
+                                    assert.equal(yea, 0, 'initial yea should be 0')
+                                    assert.equal(nay, 0, 'initial nay should be 0')
                                     assert.equal(votingPower.toString(), bigExp(100, decimals).toString(), 'total voters should be 125')
                                     assert.equal(execScript, script, 'script should be correct')
                                 })
@@ -383,7 +378,7 @@ contract('Voting app', accounts => {
                         describe('submitBatch', function () {
                             const yeas = bigExp(80, decimals)
                             const nays = bigExp(20, decimals)
-                            const proof = "0x"
+                            const proof = '0x00'
 
                             context('when the sender is the relayer', function () {
                                 const from = relayer
@@ -396,7 +391,7 @@ contract('Voting app', accounts => {
                                             const event = submitBatchEvent(receipt)
                                             assert.notEqual(event, null)
                                             assert(event.voteId.eq(voteId))
-                                            assert(event.batchId.eq(0))
+                                            assert(event.batchId.eq(bn(0)))
                                             assert(event.yea.eq(yeas))
                                             assert(event.nay.eq(nays))
                                             assert.equal(event.proof, proof)
@@ -445,7 +440,7 @@ contract('Voting app', accounts => {
                         describe('getBatch', function () {
                             const yeas = bigExp(80, decimals)
                             const nays = bigExp(20, decimals)
-                            const proof = ''
+                            const proof = '0x0'
 
                             beforeEach('submit batch', async function () {
                                 batchId = submittedBatchId(await voting.submitBatch(voteId, yeas, nays, proof, { from: relayer }))
@@ -454,12 +449,12 @@ contract('Voting app', accounts => {
                             context('when the given vote exists', function () {
                                 context('when the given batch exists', function () {
                                     it('fetches the requested batch', async function () {
-                                        const [valid, yea, nay, timestamp, proofHash] = await voting.getBatch(voteId, batchId)
+                                        const { valid, yea, nay, proofHash } = await voting.getBatch(voteId, batchId)
 
                                         assert(valid, 'batch should be valid by default')
                                         assert(yea.eq(yeas), 'batch yeas should match')
                                         assert(nay.eq(nays), 'batch nays should match')
-                                        assert.equal(proofHash, web3.sha3(proof, { encoding: 'hex' }), 'batch proof should match')
+                                        assert.equal(proofHash, web3.utils.sha3(proof, { encoding: 'hex' }), 'batch proof should match')
                                     })
                                 })
 
@@ -482,18 +477,18 @@ contract('Voting app', accounts => {
                         })
 
                         describe('challengeAggregation', function () {
-                            let holder20Vote, holder29Vote, holder20Vote2, foreignVote, submittedYeas, submittedNays
+                            let holder20Vote, holder29Vote, holder20Vote2, holder20ForeignVote, submittedYeas, submittedNays
                             let correctProof, proofWithDuplicatedVote, invalidProof, proofWithForeignVotes, proofWithDifferentVotes
 
                             beforeEach('build vote messages', async function () {
-                                holder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
-                                holder29Vote = signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
-                                holder20Vote2 = signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
-                                foreignVote = signVote(holder20, { votingAddress: NULL_ADDRESS, voteId, stake: holder20Balance, supports: true })
+                                holder20Vote = await signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                holder29Vote = await signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote2 = await signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
+                                holder20ForeignVote = await signVote(holder20, { votingAddress: ZERO_ADDRESS, voteId, stake: holder20Balance, supports: true })
 
                                 invalidProof = '0xdead'
                                 correctProof = `0x${SVRP.encode([holder20Vote, holder29Vote], 'hex')}`
-                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, foreignVote], 'hex')}`
+                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, holder20ForeignVote], 'hex')}`
                                 proofWithDuplicatedVote = `0x${SVRP.encode([holder20Vote, holder20Vote], 'hex')}`
                                 proofWithDifferentVotes = `0x${SVRP.encode([holder20Vote, holder20Vote2], 'hex')}`
                             })
@@ -520,19 +515,15 @@ contract('Voting app', accounts => {
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -542,7 +533,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeAggregation(voteId, batchId, correctProof, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -560,24 +551,20 @@ contract('Voting app', accounts => {
                                                     assert.notEqual(event, null, 'event should exist')
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                     assert.equal(event.proof, proofWithDuplicatedVote, 'proof should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -587,7 +574,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeAggregation(voteId, batchId, proofWithDuplicatedVote, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -606,23 +593,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, invalidProof, 'proof should match')
-                                                    assert(event.voteIndex.eq(0), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(0)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -632,7 +615,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeAggregation(voteId, batchId, invalidProof, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -651,23 +634,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeAggregation(voteId, batchId, proofWithForeignVotes, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -677,7 +656,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeAggregation(voteId, batchId, proofWithForeignVotes, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -696,23 +675,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, proofWithDifferentVotes, 'proof should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeAggregation(voteId, batchId, proofWithDifferentVotes, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -722,7 +697,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeAggregation(voteId, batchId, proofWithDifferentVotes, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
                                         })
@@ -810,19 +785,19 @@ contract('Voting app', accounts => {
                         })
 
                         describe('challengeVote', function () {
-                            let holder20Vote, holder29Vote, holder20Vote2, foreignVote, nonHolderVote, submittedYeas, submittedNays
+                            let holder20Vote, holder29Vote, holder20Vote2, holder20ForeignVote, nonHolderVote, submittedYeas, submittedNays
                             let correctProof, proofWithDuplicatedVote, invalidProof, proofWithForeignVotes, proofWithDifferentVotes, proofWithInvalidStakeVotes
 
                             beforeEach('build vote messages', async function () {
-                                nonHolderVote = signVote(nonHolder, { votingAddress, voteId, stake: holder29Balance, supports: true })
-                                holder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
-                                holder29Vote = signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
-                                holder20Vote2 = signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
-                                foreignVote = signVote(holder20, { votingAddress: NULL_ADDRESS, voteId, stake: holder20Balance, supports: true })
+                                nonHolderVote = await signVote(nonHolder, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote = await signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                holder29Vote = await signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder20Vote2 = await signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
+                                holder20ForeignVote = await signVote(holder20, { votingAddress: ZERO_ADDRESS, voteId, stake: holder20Balance, supports: true })
 
                                 invalidProof = '0xdead'
                                 correctProof = `0x${SVRP.encode([holder20Vote, holder29Vote], 'hex')}`
-                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, foreignVote], 'hex')}`
+                                proofWithForeignVotes = `0x${SVRP.encode([holder20Vote, holder20ForeignVote], 'hex')}`
                                 proofWithDuplicatedVote = `0x${SVRP.encode([holder20Vote, holder20Vote], 'hex')}`
                                 proofWithDifferentVotes = `0x${SVRP.encode([holder20Vote, holder20Vote2], 'hex')}`
                                 proofWithInvalidStakeVotes = `0x${SVRP.encode([holder20Vote, nonHolderVote], 'hex')}`
@@ -847,23 +822,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, proofWithInvalidStakeVotes, 'proof should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithInvalidStakeVotes, 1, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -873,7 +844,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithInvalidStakeVotes, 1, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -892,23 +863,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, invalidProof, 'proof should match')
-                                                    assert(event.voteIndex.eq(0), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(0)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeVoteStake(voteId, batchId, invalidProof, 0, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -918,7 +885,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeVoteStake(voteId, batchId, invalidProof, 0, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -937,23 +904,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithForeignVotes, 1, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -963,7 +926,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithForeignVotes, 1, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
 
@@ -982,23 +945,19 @@ contract('Voting app', accounts => {
                                                     assert(event.voteId.eq(voteId), 'vote ID should match')
                                                     assert(event.batchId.eq(batchId), 'batch ID should match')
                                                     assert.equal(event.proof, proofWithDifferentVotes, 'proof should match')
-                                                    assert(event.voteIndex.eq(1), 'vote index should match')
+                                                    assert(event.voteIndex.eq(bn(1)), 'vote index should match')
                                                 })
 
                                                 it('reverts the challenged batch', async  function () {
-                                                    const previousState = await voting.getVote(voteId)
-                                                    const previousYeas = previousState[6]
-                                                    const previousNays = previousState[7]
+                                                    const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithDifferentVotes, 1, { from: nonHolder })
 
-                                                    const currentState = await voting.getVote(voteId)
-                                                    const currentYeas = currentState[6]
-                                                    const currentNays = currentState[7]
+                                                    const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                    assert(currentYeas.plus(submittedYeas).eq(previousYeas))
-                                                    assert(currentNays.plus(submittedNays).eq(previousNays))
-                                                    assert(!(await voting.getBatch(voteId, batchId))[0], 'submitted batch should not be valid')
+                                                    assert(currentYeas.add(submittedYeas).eq(previousYeas))
+                                                    assert(currentNays.add(submittedNays).eq(previousNays))
+                                                    assert(!(await voting.getBatch(voteId, batchId)).valid, 'submitted batch should not be valid')
                                                 })
 
                                                 it('transfers the slashing payout', async function () {
@@ -1008,7 +967,7 @@ contract('Voting app', accounts => {
                                                     await voting.challengeVoteStake(voteId, batchId, proofWithDifferentVotes, 1, { from: nonHolder })
 
                                                     const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                    assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                    assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                 })
                                             })
                                         })
@@ -1100,12 +1059,12 @@ contract('Voting app', accounts => {
                             let correctPreviousProof, incorrectCurrentProof, correctCurrentProof, invalidProof, proofWithForeignVotes, proofWithDifferentVotes, previousSubmittedYeas, previousSubmittedNays, previousBatchId, currentBatchId
 
                             beforeEach('build vote messages', async function () {
-                                holder29Vote = signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
-                                holder51Vote = signVote(holder51, { votingAddress, voteId, stake: holder51Balance, supports: true })
-                                foreign20Vote = signVote(holder51, { votingAddress: NULL_ADDRESS, voteId, stake: holder51Balance, supports: true })
-                                currentHolder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
-                                currentHolder20Vote2 = signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
-                                previousHolder20Vote = signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                holder29Vote = await signVote(holder29, { votingAddress, voteId, stake: holder29Balance, supports: true })
+                                holder51Vote = await signVote(holder51, { votingAddress, voteId, stake: holder51Balance, supports: true })
+                                foreign20Vote = await signVote(holder51, { votingAddress: ZERO_ADDRESS, voteId, stake: holder51Balance, supports: true })
+                                currentHolder20Vote = await signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
+                                currentHolder20Vote2 = await signVote(holder20, { votingAddress, voteId: voteId + 1, stake: holder20Balance, supports: true })
+                                previousHolder20Vote = await signVote(holder20, { votingAddress, voteId, stake: holder20Balance, supports: true })
 
                                 invalidProof = '0xdead'
                                 correctCurrentProof = `0x${SVRP.encode([holder51Vote], 'hex')}`
@@ -1141,30 +1100,26 @@ contract('Voting app', accounts => {
                                                                 assert.notEqual(firstEvent, null, 'event should exist')
                                                                 assert(firstEvent.voteId.eq(voteId), 'vote ID should match')
                                                                 assert(firstEvent.batchId.eq(previousBatchId), 'batch ID should match')
-                                                                assert(firstEvent.voteIndex.eq(0), 'vote index should match')
+                                                                assert(firstEvent.voteIndex.eq(bn(0)), 'vote index should match')
                                                                 assert.equal(firstEvent.proof, correctPreviousProof, 'proof should match')
 
                                                                 assert.notEqual(secondEvent, null, 'event should exist')
                                                                 assert(secondEvent.voteId.eq(voteId), 'vote ID should match')
                                                                 assert(secondEvent.batchId.eq(currentBatchId), 'batch ID should match')
-                                                                assert(secondEvent.voteIndex.eq(0), 'vote index should match')
+                                                                assert(secondEvent.voteIndex.eq(bn(0)), 'vote index should match')
                                                                 assert.equal(secondEvent.proof, incorrectCurrentProof, 'proof should match')
                                                             })
 
                                                             it('reverts the challenged batch', async  function () {
-                                                                const previousState = await voting.getVote(voteId)
-                                                                const previousYeas = previousState[6]
-                                                                const previousNays = previousState[7]
+                                                                const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, incorrectCurrentProof, { from: nonHolder })
 
-                                                                const currentState = await voting.getVote(voteId)
-                                                                const currentYeas = currentState[6]
-                                                                const currentNays = currentState[7]
+                                                                const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                                assert(currentYeas.plus(currentSubmittedYeas).eq(previousYeas))
-                                                                assert(currentNays.plus(currentSubmittedNays).eq(previousNays))
-                                                                assert(!(await voting.getBatch(voteId, currentBatchId))[0], 'submitted batch should not be valid')
+                                                                assert(currentYeas.add(currentSubmittedYeas).eq(previousYeas))
+                                                                assert(currentNays.add(currentSubmittedNays).eq(previousNays))
+                                                                assert(!(await voting.getBatch(voteId, currentBatchId)).valid, 'submitted batch should not be valid')
                                                             })
 
                                                             it('transfers the slashing payout', async function () {
@@ -1174,7 +1129,7 @@ contract('Voting app', accounts => {
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, incorrectCurrentProof, { from: nonHolder })
 
                                                                 const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                                assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                                assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                             })
                                                         })
 
@@ -1196,24 +1151,20 @@ contract('Voting app', accounts => {
                                                                 assert.notEqual(event, null, 'event should exist')
                                                                 assert(event.voteId.eq(voteId), 'vote ID should match')
                                                                 assert(event.batchId.eq(currentBatchId), 'batch ID should match')
-                                                                assert(event.voteIndex.eq(0), 'vote index should match')
+                                                                assert(event.voteIndex.eq(bn(0)), 'vote index should match')
                                                                 assert.equal(event.proof, invalidProof, 'proof should match')
                                                             })
 
                                                             it('reverts the challenged batch', async  function () {
-                                                                const previousState = await voting.getVote(voteId)
-                                                                const previousYeas = previousState[6]
-                                                                const previousNays = previousState[7]
+                                                                const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, invalidProof, { from: nonHolder })
 
-                                                                const currentState = await voting.getVote(voteId)
-                                                                const currentYeas = currentState[6]
-                                                                const currentNays = currentState[7]
+                                                                const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                                assert(currentYeas.plus(currentSubmittedYeas).eq(previousYeas))
-                                                                assert(currentNays.plus(currentSubmittedNays).eq(previousNays))
-                                                                assert(!(await voting.getBatch(voteId, currentBatchId))[0], 'submitted batch should not be valid')
+                                                                assert(currentYeas.add(currentSubmittedYeas).eq(previousYeas))
+                                                                assert(currentNays.add(currentSubmittedNays).eq(previousNays))
+                                                                assert(!(await voting.getBatch(voteId, currentBatchId)).valid, 'submitted batch should not be valid')
                                                             })
 
                                                             it('transfers the slashing payout', async function () {
@@ -1223,7 +1174,7 @@ contract('Voting app', accounts => {
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, invalidProof, { from: nonHolder })
 
                                                                 const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                                assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                                assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                             })
                                                         })
 
@@ -1245,24 +1196,20 @@ contract('Voting app', accounts => {
                                                                 assert.notEqual(event, null, 'event should exist')
                                                                 assert(event.voteId.eq(voteId), 'vote ID should match')
                                                                 assert(event.batchId.eq(currentBatchId), 'batch ID should match')
-                                                                assert(event.voteIndex.eq(0), 'vote index should match')
+                                                                assert(event.voteIndex.eq(bn(0)), 'vote index should match')
                                                                 assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
                                                             })
 
                                                             it('reverts the challenged batch', async  function () {
-                                                                const previousState = await voting.getVote(voteId)
-                                                                const previousYeas = previousState[6]
-                                                                const previousNays = previousState[7]
+                                                                const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, proofWithForeignVotes, { from: nonHolder })
 
-                                                                const currentState = await voting.getVote(voteId)
-                                                                const currentYeas = currentState[6]
-                                                                const currentNays = currentState[7]
+                                                                const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                                assert(currentYeas.plus(currentSubmittedYeas).eq(previousYeas))
-                                                                assert(currentNays.plus(currentSubmittedNays).eq(previousNays))
-                                                                assert(!(await voting.getBatch(voteId, currentBatchId))[0], 'submitted batch should not be valid')
+                                                                assert(currentYeas.add(currentSubmittedYeas).eq(previousYeas))
+                                                                assert(currentNays.add(currentSubmittedNays).eq(previousNays))
+                                                                assert(!(await voting.getBatch(voteId, currentBatchId)).valid, 'submitted batch should not be valid')
                                                             })
 
                                                             it('transfers the slashing payout', async function () {
@@ -1272,7 +1219,7 @@ contract('Voting app', accounts => {
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, proofWithForeignVotes, { from: nonHolder })
 
                                                                 const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                                assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                                assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                             })
                                                         })
 
@@ -1294,24 +1241,20 @@ contract('Voting app', accounts => {
                                                                 assert.notEqual(event, null, 'event should exist')
                                                                 assert(event.voteId.eq(voteId), 'vote ID should match')
                                                                 assert(event.batchId.eq(currentBatchId), 'batch ID should match')
-                                                                assert(event.voteIndex.eq(0), 'vote index should match')
+                                                                assert(event.voteIndex.eq(bn(0)), 'vote index should match')
                                                                 assert.equal(event.proof, proofWithForeignVotes, 'proof should match')
                                                             })
 
                                                             it('reverts the challenged batch', async  function () {
-                                                                const previousState = await voting.getVote(voteId)
-                                                                const previousYeas = previousState[6]
-                                                                const previousNays = previousState[7]
+                                                                const { yea: previousYeas, nay: previousNays } = await voting.getVote(voteId)
 
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, proofWithForeignVotes, { from: nonHolder })
 
-                                                                const currentState = await voting.getVote(voteId)
-                                                                const currentYeas = currentState[6]
-                                                                const currentNays = currentState[7]
+                                                                const { yea: currentYeas, nay: currentNays } = await voting.getVote(voteId)
 
-                                                                assert(currentYeas.plus(currentSubmittedYeas).eq(previousYeas))
-                                                                assert(currentNays.plus(currentSubmittedNays).eq(previousNays))
-                                                                assert(!(await voting.getBatch(voteId, currentBatchId))[0], 'submitted batch should not be valid')
+                                                                assert(currentYeas.add(currentSubmittedYeas).eq(previousYeas))
+                                                                assert(currentNays.add(currentSubmittedNays).eq(previousNays))
+                                                                assert(!(await voting.getBatch(voteId, currentBatchId)).valid, 'submitted batch should not be valid')
                                                             })
 
                                                             it('transfers the slashing payout', async function () {
@@ -1321,7 +1264,7 @@ contract('Voting app', accounts => {
                                                                 await voting.challengeDuplication(voteId, previousBatchId, currentBatchId, 0, 0, correctPreviousProof, proofWithForeignVotes, { from: nonHolder })
 
                                                                 const currentBalance = await collateralToken.balanceOf(nonHolder)
-                                                                assert(currentBalance.eq(previousBalance.plus(slashingCost)))
+                                                                assert(currentBalance.eq(previousBalance.add(slashingCost)))
                                                             })
                                                         })
                                                     })
@@ -1539,7 +1482,7 @@ contract('Voting app', accounts => {
 
                         describe('changeRequiredSupport', function () {
                             it('does not affect the vote', async function () {
-                                await voting.changeSupportRequiredPct(pct16(70))
+                                await voting.changeSupportRequiredPct(pct(70))
 
                                 // With previous required support at 50%, vote should be approved
                                 // with new quorum at 70% it shouldn't have, but since min quorum is snapshotted
@@ -1547,11 +1490,11 @@ contract('Voting app', accounts => {
 
                                 const yeas = bigExp(69, decimals)
                                 const nays = bigExp(10, decimals)
-                                await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
+                                await voting.submitBatch(voteId, yeas, nays, '0x0', { from: relayer })
                                 await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
 
-                                const state = await voting.getVote(voteId)
-                                assert(state[4].eq(neededSupport), 'required support in vote should stay equal')
+                                const { supportRequired } = await voting.getVote(voteId)
+                                assert(supportRequired.eq(neededSupport), 'required support in vote should stay equal')
 
                                 // can be executed
                                 assert(await voting.canExecute(voteId), 'voting should be allowed to be executed')
@@ -1561,7 +1504,7 @@ contract('Voting app', accounts => {
 
                         describe('changeMinimumAcceptanceQuorum', function () {
                             it('doesnt affect the vote', async function () {
-                                await voting.changeMinAcceptQuorumPct(pct16(50))
+                                await voting.changeMinAcceptQuorumPct(pct(50))
 
                                 // With previous min acceptance quorum at 20%, vote should be approved
                                 // with new quorum at 50% it shouldn't have, but since min quorum is snapshotted
@@ -1569,11 +1512,11 @@ contract('Voting app', accounts => {
 
                                 const yeas = bigExp(29, decimals)
                                 const nays = bigExp(0, decimals)
-                                await voting.submitBatch(voteId, yeas, nays, 'proof', { from: relayer })
+                                await voting.submitBatch(voteId, yeas, nays, '0x0', { from: relayer })
                                 await timeTravel(VOTING_TIME + CHALLENGE_WINDOW_IN_SECONDS + 1)
 
-                                const state = await voting.getVote(voteId)
-                                assert(state[5].eq(minimumAcceptanceQuorum), 'acceptance quorum in vote should stay equal')
+                                const { minAcceptQuorum } = await voting.getVote(voteId)
+                                assert(minAcceptQuorum.eq(minimumAcceptanceQuorum), 'acceptance quorum in vote should stay equal')
 
                                 // can be executed
                                 assert(await voting.canExecute(voteId), 'voting should be allowed to be executed')
@@ -1653,20 +1596,20 @@ contract('Voting app', accounts => {
                             context('when automatic execution is allowed', function () {
                                 it('creates and executes a vote', async function () {
                                     const voteId = createdVoteId(await voting.newVoteExt(EMPTY_SCRIPT, 'metadata', true, true, { from: holder1 }))
-                                    const [isOpen, isExecuted] = await voting.getVote(voteId)
+                                    const { open, executed } = await voting.getVote(voteId)
 
-                                    assert.isFalse(isOpen, 'vote should be closed')
-                                    assert.isTrue(isExecuted, 'vote should have been executed')
+                                    assert.isFalse(open, 'vote should be closed')
+                                    assert.isTrue(executed, 'vote should have been executed')
                                 })
                             })
 
                             context('when automatic execution is not allowed', function () {
                                 it('creates but does not execute a vote', async function () {
                                     const voteId = createdVoteId(await voting.newVoteExt(EMPTY_SCRIPT, 'metadata', true, false, { from: holder1 }))
-                                    const [isOpen, isExecuted] = await voting.getVote(voteId)
+                                    const { open, executed } = await voting.getVote(voteId)
 
-                                    assert.isTrue(isOpen, 'vote should be open')
-                                    assert.isFalse(isExecuted, 'vote should not have been executed')
+                                    assert.isTrue(open, 'vote should be open')
+                                    assert.isFalse(executed, 'vote should not have been executed')
                                 })
                             })
                         })
@@ -1685,9 +1628,9 @@ contract('Voting app', accounts => {
                                     const voteId = createdVoteId(await voting.newVote(EMPTY_SCRIPT, 'metadata'))
                                     await voting.vote(voteId, true, true, { from: holder1 })
 
-                                    const [isOpen, isExecuted] = await voting.getVote(voteId)
-                                    assert.isFalse(isOpen, 'vote should be closed')
-                                    assert.isTrue(isExecuted, 'vote should have been executed')
+                                    const { open, executed } = await voting.getVote(voteId)
+                                    assert.isFalse(open, 'vote should be closed')
+                                    assert.isTrue(executed, 'vote should have been executed')
                                 })
                             })
 
@@ -1696,9 +1639,9 @@ contract('Voting app', accounts => {
                                     const voteId = createdVoteId(await voting.newVote(EMPTY_SCRIPT, 'metadata'))
                                     await voting.vote(voteId, true, false, { from: holder1 })
 
-                                    const [isOpen, isExecuted] = await voting.getVote(voteId)
-                                    assert.isFalse(isOpen, 'vote should be closed')
-                                    assert.isFalse(isExecuted, 'vote should not have been executed')
+                                    const { open, executed } = await voting.getVote(voteId)
+                                    assert.isFalse(open, 'vote should be closed')
+                                    assert.isFalse(executed, 'vote should not have been executed')
                                 })
                             })
                         })
@@ -1721,18 +1664,18 @@ contract('Voting app', accounts => {
                             await voting.vote(voteId, true, true, { from: holder1 })
                             await voting.vote(voteId, true, true, { from: holder2 })
 
-                            const [isOpen, isExecuted] = await voting.getVote(voteId)
+                            const { open, executed } = await voting.getVote(voteId)
 
-                            assert.isFalse(isOpen, 'vote should be closed')
-                            assert.isTrue(isExecuted, 'vote should have been executed')
+                            assert.isFalse(open, 'vote should be closed')
+                            assert.isTrue(executed, 'vote should have been executed')
                         })
 
                         it('creating vote as holder2 executes vote', async function () {
                             const voteId = createdVoteId(await voting.newVote(EMPTY_SCRIPT, 'metadata', { from: holder2 }))
-                            const [isOpen, isExecuted] = await voting.getVote(voteId)
+                            const { open, executed } = await voting.getVote(voteId)
 
-                            assert.isFalse(isOpen, 'vote should be closed')
-                            assert.isTrue(isExecuted, 'vote should have been executed')
+                            assert.isFalse(open, 'vote should be closed')
+                            assert.isTrue(executed, 'vote should have been executed')
                         })
                     })
                 })

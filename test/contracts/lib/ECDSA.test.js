@@ -1,11 +1,11 @@
-const BN = web3.BigNumber
-const SVRP = require('../../../lib/SVRP')
-const { sign } = require('../../../lib/sign')(web3)
+const { sign } = require('../../../lib/helpers/sign')(web3)
+const { stake } = require('../../../lib/helpers/numbers')
+const { voteHash } = require('../../../lib/helpers/identifiers')
 
 const ECDSAMock = artifacts.require('ECDSAMock')
 
 contract('ECDSA', function ([_, someone, anotherAddress]) {
-    const MESSAGE = SVRP.hashMessage({ votingAddress: anotherAddress, voteId: 1, stake: new BN('15e18'), supports: true })
+    const MESSAGE = voteHash({ votingAddress: anotherAddress, voteId: 1, stake: stake(15), supports: true })
 
     beforeEach(async function () {
         this.ecdsa = await ECDSAMock.new()
@@ -13,7 +13,7 @@ contract('ECDSA', function ([_, someone, anotherAddress]) {
 
     context('with correct signature', function () {
         it('returns the signer address', async function () {
-            const signature = sign(someone, MESSAGE)
+            const signature = await sign(someone, MESSAGE)
 
             assert.equal(await this.ecdsa.recover(MESSAGE, signature), someone)
         })
@@ -21,9 +21,9 @@ contract('ECDSA', function ([_, someone, anotherAddress]) {
 
     context('with wrong signature', function () {
         it('does not return the signer address', async function () {
-            const signature = sign(someone, MESSAGE)
+            const signature = await sign(someone, MESSAGE)
 
-            assert.notEqual(await this.ecdsa.recover('bla', signature), someone)
+            assert.notEqual(await this.ecdsa.recover('0xdead', signature), someone)
         })
     })
 })

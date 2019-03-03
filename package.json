@@ -50,9 +50,8 @@
     "solidity-coverage": "0.5.11",
     "solidity-sha3": "^0.4.1",
     "solium": "^1.0.4",
-    "truffle": "4.1.14",
+    "truffle": "~5.0.5",
     "truffle-hdwallet-provider": "0.0.3",
-    "web3-utils": "^1.0.0-beta.37",
     "webpack": "3.10.0"
   },
   "dependencies": {
