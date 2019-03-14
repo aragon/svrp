@@ -14,11 +14,10 @@
     "publish:rinkeby": "npm run compile && aragon publish --no-confirm=true --keyfile ~/.rinkebykey.json \"$(npm run deploy:rinkeby | tail -n 1)\"",
     "publish:rinkeby:content": "aragon publish --no-confirm=true --keyfile ~/.rinkebykey.json",
     "lint": "solium --dir ./contracts",
-    "test": "npm run ganache-cli:test && npm run geth:test",
+    "test": "./test/scripts/tests.sh",
     "test:gas": "GAS_REPORTER=true npm test",
-    "coverage": "SOLIDITY_COVERAGE=true npm run ganache-cli:test",
+    "coverage": "SOLIDITY_COVERAGE=true npm test",
     "truffle:dev": "node_modules/.bin/truffle dev",
-    "ganache-cli:test": "./test/tests.sh",
     "prepare": "cd app && npm install",
     "prepublishOnly": "truffle compile --all"
   },
