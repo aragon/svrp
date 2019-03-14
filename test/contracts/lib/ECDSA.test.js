@@ -1,5 +1,5 @@
 const { sign } = require('../../../lib/helpers/sign')(web3)
-const { stake } = require('../../../lib/helpers/numbers')
+const { stake } = require('../../../lib/helpers/numbers')(web3)
 const { voteHash } = require('../../../lib/helpers/identifiers')
 
 const ECDSAMock = artifacts.require('ECDSAMock')

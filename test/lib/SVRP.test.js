@@ -1,7 +1,7 @@
 const RLP = require('rlp')
 const SVRP = require('../../lib/models/SVRP')
 const { signVote } = require('../../lib/helpers/sign')(web3)
-const { bn, stake } = require('../../lib/helpers/numbers')
+const { bn, stake } = require('../../lib/helpers/numbers')(web3)
 
 contract('SVRP', ([voter1, voter2, voter3, voter4, votingAddress, anotherVotingAddress]) => {
     describe('encode', function () {
