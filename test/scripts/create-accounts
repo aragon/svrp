@@ -1,0 +1,8 @@
+for (var i = 0; i < 8; i++) {
+    balance = 100000
+    account = personal.newAccount("");
+    personal.unlockAccount(account, "");
+    eth.sendTransaction({ from: eth.accounts[0], to: account, value: web3.toWei(balance, "ether") });
+    personal.unlockAccount(account, '', 86400);
+    console.log('Created account ' + account + ' with ' + balance + ' ETH');
+}
