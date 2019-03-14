@@ -4,8 +4,8 @@
 
 pragma solidity 0.4.24;
 
-import "./lib/RLP.sol";
 import "./lib/ECDSA.sol";
+import "@aragon/evm-storage-proofs/contracts/lib/RLP.sol";
 
 library SVRPProof {
     using RLP for bytes;
@@ -16,14 +16,6 @@ library SVRPProof {
 
     function equal(bytes _proof, bytes32 _anotherProofHash) internal pure returns (bool) {
         return keccak256(_proof) == _anotherProofHash;
-    }
-
-    function isValid(bytes _proof) internal pure returns (bool) {
-        return isList(_proof);
-    }
-
-    function isList(bytes _proof) internal pure returns (bool) {
-        return _proof.toRLPItem().isList();
     }
 
     function isValidIndex(bytes _proof, uint256 _index) internal pure returns (bool) {

@@ -4,7 +4,6 @@
 
 pragma solidity 0.4.24;
 
-import "./lib/RLP.sol";
 import "./SVRPProof.sol";
 
 import "@aragon/os/contracts/apps/AragonApp.sol";
@@ -12,7 +11,8 @@ import "@aragon/os/contracts/common/IForwarder.sol";
 import "@aragon/os/contracts/lib/token/ERC20.sol";
 import "@aragon/os/contracts/lib/math/SafeMath.sol";
 import "@aragon/os/contracts/lib/math/SafeMath64.sol";
-import "@aragon/apps-shared-minime/contracts/MiniMeToken.sol";
+import "@aragon/evm-storage-proofs/contracts/lib/RLP.sol";
+import "@aragon/evm-storage-proofs/contracts/adapters/TokenStorageProofs.sol";
 
 contract Voting is IForwarder, AragonApp {
     using SafeMath for uint256;
@@ -26,6 +26,7 @@ contract Voting is IForwarder, AragonApp {
     bytes32 public constant MODIFY_QUORUM_ROLE = keccak256("MODIFY_QUORUM_ROLE");
 
     uint64 public constant PCT_BASE = 10 ** 18; // 0% = 0; 1% = 10^16; 100% = 10^18
+    uint64 public constant NEW_VOTE_MAX_BLOCKS_ANTIQUITY = 256;
     uint256 public constant CHALLENGE_WINDOW = 7 days;
 
     string private constant ERROR_NO_VOTE = "VOTING_NO_VOTE";
@@ -41,6 +42,7 @@ contract Voting is IForwarder, AragonApp {
     string private constant ERROR_NO_VOTING_POWER = "VOTING_NO_VOTING_POWER";
     string private constant ERROR_CHALLENGE_REJECTED = "VOTING_CHALLENGE_REJECTED";
     string private constant ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD = "VOTING_OUT_OF_CHALLENGE_PERIOD";
+    string private constant ERROR_BLOCK_NUMBER_NOT_ALLOWED = "VOTING_BLOCKNUMBER_NOT_ALLOWED";
 
     struct Vote {
         bool executed;
@@ -64,8 +66,12 @@ contract Voting is IForwarder, AragonApp {
         uint256 timestamp;
     }
 
-    MiniMeToken public token;
+    ERC20 public token;
     ERC20 public collateralToken;
+    TokenStorageProofs public tokenStorageProofs;
+    TokenStorageProofs.TokenType public tokenType;
+    uint256 public tokenSupplySlot;
+    uint256 public tokenBalancesSlot;
     uint64 public supportRequiredPct;
     uint64 public minAcceptQuorumPct;
     uint64 public voteTime;
@@ -83,7 +89,7 @@ contract Voting is IForwarder, AragonApp {
     event InvalidProof(uint256 indexed voteId, uint256 indexed batchId, bytes proof);
     event InvalidVote(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
     event InvalidAggregation(uint256 indexed voteId, uint256 indexed batchId, bytes proof);
-    event InvalidVoteStake(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
+    event InvalidVoteStake(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex, bytes storageProof);
     event VoteDuplication(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
 
     modifier voteExists(uint256 _voteId) {
@@ -98,14 +104,18 @@ contract Voting is IForwarder, AragonApp {
 
     /**
     * @notice Initialize Voting app with `_token.symbol(): string` for governance, minimum support of `@formatPct(_supportRequiredPct)`%, minimum acceptance quorum of `@formatPct(_minAcceptQuorumPct)`%, and a voting duration of `@transformTime(_voteTime)`
-    * @param _token MiniMeToken Address that will be used as governance token
+    * @param _token ERC20 Address that will be used as governance token
     * @param _supportRequiredPct Percentage of yeas in casted votes for a vote to succeed (expressed as a percentage of 10^18; eg. 10^16 = 1%, 10^18 = 100%)
     * @param _minAcceptQuorumPct Percentage of yeas in total possible votes for a vote to succeed (expressed as a percentage of 10^18; eg. 10^16 = 1%, 10^18 = 100%)
     * @param _voteTime Seconds that a vote will be open for token holders to vote (unless enough yeas or nays have been cast to make an early decision)
     */
     function initialize(
-        MiniMeToken _token,
+        ERC20 _token,
         ERC20 _collateralToken,
+        TokenStorageProofs _tokenStorageProofs,
+        TokenStorageProofs.TokenType _tokenType,
+        uint256 _tokenSupplySlot,
+        uint256 _tokenBalancesSlot,
         uint64 _supportRequiredPct,
         uint64 _minAcceptQuorumPct,
         uint64 _voteTime,
@@ -121,6 +131,10 @@ contract Voting is IForwarder, AragonApp {
 
         token = _token;
         collateralToken = _collateralToken;
+        tokenType = _tokenType;
+        tokenSupplySlot = _tokenSupplySlot;
+        tokenBalancesSlot = _tokenBalancesSlot;
+        tokenStorageProofs = _tokenStorageProofs;
         supportRequiredPct = _supportRequiredPct;
         minAcceptQuorumPct = _minAcceptQuorumPct;
         voteTime = _voteTime;
@@ -162,8 +176,9 @@ contract Voting is IForwarder, AragonApp {
     * @param _metadata Vote metadata
     * @return voteId Id for newly created vote
     */
-    function newVote(bytes _executionScript, string _metadata) external auth(CREATE_VOTES_ROLE) returns (uint256 voteId) {
-        return _newVote(_executionScript, _metadata);
+    function newVote(string _metadata, uint64 _blockNumber, bytes _storageProof, bytes _executionScript) external auth(CREATE_VOTES_ROLE) returns (uint256 voteId) {
+        // TODO: we could remove the blockNumber parameter asking it to the tokenStorageProofs contract using the given storageProof
+        return _newVote(_executionScript, _metadata, _blockNumber, _storageProof);
     }
 
     /**
@@ -204,7 +219,7 @@ contract Voting is IForwarder, AragonApp {
     /**
     * @notice Challenge batch for invalid vote
     */
-    function challengeVoteStake(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex) external batchExists(_voteId, _batchId) {
+    function challengeVoteStake(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex, bytes _storageProof) external batchExists(_voteId, _batchId) {
         Batch storage batch_ = votes[_voteId].batches[_batchId];
 
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
@@ -215,8 +230,8 @@ contract Voting is IForwarder, AragonApp {
             emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
             return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
-        if (_isInvalidStake(_voteId, _proof, _voteIndex)) {
-            emit InvalidVoteStake(_voteId, _batchId, _proof, _voteIndex);
+        if (_isInvalidStake(_voteId, _proof, _voteIndex, _storageProof)) {
+            emit InvalidVoteStake(_voteId, _batchId, _proof, _voteIndex, _storageProof);
             return _rollbackBatchAndPayOutReward(_voteId, _batchId, msg.sender);
         }
 
@@ -272,8 +287,9 @@ contract Voting is IForwarder, AragonApp {
     * @param _evmScript Start vote with script
     */
     function forward(bytes _evmScript) public {
+        // TODO: Fix forwarding with storage proofs
         require(canForward(msg.sender, _evmScript), ERROR_CAN_NOT_FORWARD);
-        _newVote(_evmScript, "");
+        _newVote(_evmScript, "", 0, new bytes(0));
     }
 
     function canForward(address _sender, bytes) public view returns (bool) {
@@ -375,14 +391,17 @@ contract Voting is IForwarder, AragonApp {
         timestamp = batch_.timestamp;
     }
 
-    function _newVote(bytes _executionScript, string _metadata) internal returns (uint256 voteId) {
-        uint256 votingPower = token.totalSupplyAt(vote_.snapshotBlock);
+    function _newVote(bytes memory _executionScript, string _metadata, uint64 _blockNumber, bytes memory _storageProof) internal returns (uint256 voteId) {
+        uint64 blocksDifference = (getBlockNumber64() - 1).sub(_blockNumber); // avoid double voting in this very block
+        require(blocksDifference <= NEW_VOTE_MAX_BLOCKS_ANTIQUITY, ERROR_BLOCK_NUMBER_NOT_ALLOWED);
+
+        uint256 votingPower = tokenStorageProofs.getTotalSupply(address(token), uint256(_blockNumber), _storageProof, tokenType, tokenSupplySlot);
         require(votingPower > 0, ERROR_NO_VOTING_POWER);
 
         voteId = votesLength++;
         Vote storage vote_ = votes[voteId];
         vote_.startDate = getTimestamp64();
-        vote_.snapshotBlock = getBlockNumber64() - 1; // avoid double voting in this very block
+        vote_.snapshotBlock = _blockNumber;
         vote_.supportRequiredPct = supportRequiredPct;
         vote_.minAcceptQuorumPct = minAcceptQuorumPct;
         vote_.votingPower = votingPower;
@@ -439,7 +458,7 @@ contract Voting is IForwarder, AragonApp {
     }
 
     function _withinChallengeWindow(Batch storage batch_) internal view returns (bool) {
-        return batch_.timestamp + CHALLENGE_WINDOW >= now;
+        return batch_.timestamp + CHALLENGE_WINDOW >= getTimestamp();
     }
 
     function _existsVote(uint256 _voteId) internal view returns (bool) {
@@ -476,10 +495,10 @@ contract Voting is IForwarder, AragonApp {
     * @dev Checks whether a vote stake in a batch was valid or not
     * @return true if the given vote stake was incorrect
     */
-    function _isInvalidStake(uint256 _voteId, bytes _proof, uint256 _voteIndex) internal view returns (bool) {
+    function _isInvalidStake(uint256 _voteId, bytes _proof, uint256 _voteIndex, bytes _storageProof) internal view returns (bool) {
         RLP.RLPItem[] memory vote = _proof.voteAt(_voteIndex);
         address voter = vote.voter();
-        uint256 voterBalance = token.balanceOfAt(voter, votes[_voteId].snapshotBlock);
+        uint256 voterBalance = tokenStorageProofs.getBalance(address(token), voter, votes[_voteId].snapshotBlock, _storageProof, tokenType, tokenBalancesSlot);
         return voterBalance != vote.stake();
     }
 
@@ -496,7 +515,7 @@ contract Voting is IForwarder, AragonApp {
     /**
     * @dev Checks whether a batch was aggregated correctly or not based on a given proof:
     * - Proof is well formed and can be decoded
-    * - All votes must be unique within proof
+    * - All votes must be unique within proof (addresses must be strictly increasing to prevent this)
     * - Tally of all votes adds up
     * @return true if the given proof is valid and the tally was incorrect
     */
@@ -514,7 +533,6 @@ contract Voting is IForwarder, AragonApp {
             if (voter <= previousAddress) return (true, i, false);
 
             previousAddress = voter;
-
             if (vote.supports()) yeas = yeas.add(vote.stake());
             else nays = nays.add(vote.stake());
         }
