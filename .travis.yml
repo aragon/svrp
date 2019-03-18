@@ -1,0 +1,22 @@
+language: node_js
+
+node_js:
+  - '8'
+
+cache:
+  directories:
+    - node_modules
+
+env:
+  - TASK=test
+#  - TASK=lint
+#  - TASK=coverage
+
+before_script:
+  - npm prune
+
+script: "npm run $TASK"
+
+# Disable coverage and linter for now
+# after_success:
+#  - cat coverage/lcov.info | ./node_modules/.bin/coveralls
