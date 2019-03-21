@@ -434,6 +434,80 @@ contract('Voting app', accounts => {
                                 })
                             })
 
+                            describe.only('canCastVote', function () {
+                                context('when the given vote exists', function () {
+                                    context('when the vote is open', function () {
+                                        context('when the sender is a token holder', function () {
+                                            const from = holder20
+
+                                            context('when the sender has not vote yet', function () {
+                                                it('returns true', async function () {
+                                                    assert(await voting.canCastVote(voteId, from, { from }))
+                                                })
+                                            })
+
+                                            context('when the sender has already vote', function () {
+                                                beforeEach('cast vote', async function () {
+                                                    await voting.castVote(voteId, true, holder20Balance, { from })
+                                                })
+
+                                                it('returns false', async function () {
+                                                    assert.isFalse(await voting.canCastVote(voteId, from, { from }))
+                                                })
+                                            })
+                                        })
+
+                                        context('when the sender is not a token holder', function () {
+                                            const from = nonHolder
+
+                                            context('when the sender has not vote yet', function () {
+                                                it('returns true', async function () {
+                                                    assert(await voting.canCastVote(voteId, from, { from }))
+                                                })
+                                            })
+
+                                            context('when the sender has already vote', function () {
+                                                beforeEach('cast vote', async function () {
+                                                    await voting.castVote(voteId, true, holder20Balance, { from })
+                                                })
+
+                                                it('returns false', async function () {
+                                                    assert.isFalse(await voting.canCastVote(voteId, from, { from }))
+                                                })
+                                            })
+                                        })
+                                    })
+
+                                    context('when the vote is closed', function () {
+                                        beforeEach('close vote', async function () {
+                                            await timeTravel(VOTING_TIME + 1)
+                                        })
+
+                                        context('when the sender is a token holder', function () {
+                                            const from = holder20
+
+                                            it('returns false', async function () {
+                                                assert.isFalse(await voting.canCastVote(voteId, from, { from }))
+                                            })
+                                        })
+
+                                        context('when the sender is not a token holder', function () {
+                                            const from = nonHolder
+
+                                            it('returns false', async function () {
+                                                assert.isFalse(await voting.canCastVote(voteId, from, { from }))
+                                            })
+                                        })
+                                    })
+                                })
+
+                                context('when the given vote does not exist', function () {
+                                    it('reverts', async function () {
+                                        await assertRevert(voting.contract.methods.canCastVote(hex(voteId + 1), holder20), 'VOTING_NO_VOTE')
+                                    })
+                                })
+                            })
+
                             describe('submitBatch', function () {
                                 const yeas = bigExp(80, decimals)
                                 const nays = bigExp(20, decimals)
@@ -1650,8 +1724,7 @@ contract('Voting app', accounts => {
                                 })
                             })
 
-                            // TODO: allow holders to vote
-                            xdescribe('vote', function () {
+                            describe('castVote', function () {
                                 context('when the sender is a token holder', async function () {
                                     context('when the holder did not vote yet', async function () {
                                         context('when automatic execution is allowed', function () {

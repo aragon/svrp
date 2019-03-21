@@ -4,7 +4,7 @@
 set -o errexit -o pipefail
 
 # Executes cleanup function at script exit.
-trap cleanup EXIT
+#trap cleanup EXIT
 
 cleanup() {
   # Kill the geth instance that we started (if we started one and if it's still running).
@@ -14,7 +14,7 @@ cleanup() {
 }
 
 setup() {
-  OUTPUT_FILE="/dev/null"
+  OUTPUT_FILE="nohup.out"
 
   if [ "$SOLIDITY_COVERAGE" = true ]; then
     PORT="8555"
@@ -70,7 +70,7 @@ measure_coverage() {
 main() {
   setup
   start_geth
-  if [ "$SOLIDITY_COVERAGE" = true ]; then measure_coverage; else run_tests; fi
+#  if [ "$SOLIDITY_COVERAGE" = true ]; then measure_coverage; else run_tests; fi
 }
 
 main

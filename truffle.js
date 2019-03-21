@@ -2,14 +2,14 @@ module.exports = {
     networks: {
         development: {
             host: 'localhost',
+            network_id: '*',
             port: 8545,
             gas: 6.4e6,
-            gasPrice: 1e9,
-            network_id: '8545'
+            gasPrice: 1e6
         },
         coverage: {
             host: 'localhost',
-            network_id: '8555',
+            network_id: '*',
             port: 8555,
             gas: 0xffffffffff,
             gasPrice: 0x01
@@ -21,7 +21,7 @@ module.exports = {
             settings: {
                 optimizer: {
                     enabled: true,
-                    runs: 200
+                    runs: 10000
                 }
             }
         }

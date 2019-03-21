@@ -4,6 +4,7 @@
 
 pragma solidity 0.4.24;
 
+
 import "./SVRPProof.sol";
 
 import "@aragon/os/contracts/apps/AragonApp.sol";
@@ -27,10 +28,12 @@ contract Voting is IForwarder, AragonApp {
 
     uint64 public constant PCT_BASE = 10 ** 18; // 0% = 0; 1% = 10^16; 100% = 10^18
     uint64 public constant NEW_VOTE_MAX_BLOCKS_ANTIQUITY = 256;
-    uint256 public constant CHALLENGE_WINDOW = 7 days;
+    uint256 public constant VOTER_CHALLENGE_WINDOW = 10 days;
+    uint256 public constant RELAYER_CHALLENGE_WINDOW = 7 days;
 
     string private constant ERROR_NO_VOTE = "VOTING_NO_VOTE";
     string private constant ERROR_NO_BATCH = "VOTING_NO_BATCH";
+    string private constant ERROR_NO_CASTED_VOTE = "VOTING_NO_CASTED_VOTE";
     string private constant ERROR_INIT_PCTS = "VOTING_INIT_PCTS";
     string private constant ERROR_CHANGE_SUPPORT_PCTS = "VOTING_CHANGE_SUPPORT_PCTS";
     string private constant ERROR_CHANGE_QUORUM_PCTS = "VOTING_CHANGE_QUORUM_PCTS";
@@ -41,8 +44,13 @@ contract Voting is IForwarder, AragonApp {
     string private constant ERROR_CAN_NOT_FORWARD = "VOTING_CAN_NOT_FORWARD";
     string private constant ERROR_NO_VOTING_POWER = "VOTING_NO_VOTING_POWER";
     string private constant ERROR_CHALLENGE_REJECTED = "VOTING_CHALLENGE_REJECTED";
-    string private constant ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD = "VOTING_OUT_OF_CHALLENGE_PERIOD";
+    string private constant ERROR_OUT_OF_CHALLENGE_PERIOD = "VOTING_OUT_OF_CHALLENGE_PERIOD";
     string private constant ERROR_BLOCK_NUMBER_NOT_ALLOWED = "VOTING_BLOCKNUMBER_NOT_ALLOWED";
+    string private constant ERROR_CHALLENGER_PAYOUT_FAILED = "VOTING_CHALLENGE_PAYOUT_FAILED";
+    string private constant ERROR_CAN_NOT_CAST_VOTE = "VOTING_CAN_NOT_CAST_VOTE";
+    string private constant ERROR_INVALID_COLLATERAL_AMOUNT = "VOTING_INVALID_COLLATERAL_AMT";
+    string private constant ERROR_CAN_NOT_CLAIM_COLLATERAL = "VOTING_CANNOT_CLAIM_COLLATERAL";
+    string private constant ERROR_COLLATERAL_RETURN_FAILED = "VOTING_COLLATERAL_RETURN_FAIL";
 
     struct Vote {
         bool executed;
@@ -54,8 +62,9 @@ contract Voting is IForwarder, AragonApp {
         uint256 nay;
         uint256 votingPower;
         bytes executionScript;
-        mapping (uint256 => Batch) batches;
         uint256 batchesLength;
+        mapping (uint256 => Batch) batches;
+        mapping (address => CastedVote) castedVotes;
     }
 
     struct Batch {
@@ -63,6 +72,13 @@ contract Voting is IForwarder, AragonApp {
         uint256 yea;
         uint256 nay;
         bytes32 proofHash;
+        uint256 timestamp;
+    }
+
+    struct CastedVote {
+        bool valid;
+        bool supports;
+        uint256 stake;
         uint256 timestamp;
     }
 
@@ -75,13 +91,15 @@ contract Voting is IForwarder, AragonApp {
     uint64 public supportRequiredPct;
     uint64 public minAcceptQuorumPct;
     uint64 public voteTime;
-    uint256 public slashingCost;
+    uint256 public voterSlashingCost;
+    uint256 public relayerSlashingCost;
 
     // We are mimicing an array, we use a mapping instead to make app upgrade more graceful
     mapping (uint256 => Vote) internal votes;
     uint256 public votesLength;
 
     event StartVote(uint256 indexed voteId, address indexed creator, string metadata);
+    event CastVote(uint256 indexed voteId, address indexed voter, bool supports, uint256 stake, uint256 timestamp);
     event SubmitBatch(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 yea, uint256 nay);
     event ExecuteVote(uint256 indexed voteId);
     event ChangeSupportRequired(uint64 supportRequiredPct);
@@ -90,6 +108,7 @@ contract Voting is IForwarder, AragonApp {
     event InvalidVote(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
     event InvalidAggregation(uint256 indexed voteId, uint256 indexed batchId, bytes proof);
     event InvalidVoteStake(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex, bytes storageProof);
+    event InvalidCastedVoteStake(uint256 indexed voteId, address indexed voter, bytes storageProof);
     event VoteDuplication(uint256 indexed voteId, uint256 indexed batchId, bytes proof, uint256 voteIndex);
 
     modifier voteExists(uint256 _voteId) {
@@ -99,6 +118,11 @@ contract Voting is IForwarder, AragonApp {
 
     modifier batchExists(uint256 _voteId, uint256 _batchId) {
         require(_existsBatch(_voteId, _batchId), ERROR_NO_BATCH);
+        _;
+    }
+
+    modifier castedVoteExists(uint256 _voteId, address _voter) {
+        require(_existsCastedVote(_voteId, _voter), ERROR_NO_CASTED_VOTE);
         _;
     }
 
@@ -119,7 +143,8 @@ contract Voting is IForwarder, AragonApp {
         uint64 _supportRequiredPct,
         uint64 _minAcceptQuorumPct,
         uint64 _voteTime,
-        uint256 _slashingCost
+        uint256 _voterSlashingCost,
+        uint256 _relayerSlashingCost
     )
         external
         onlyInit
@@ -138,7 +163,8 @@ contract Voting is IForwarder, AragonApp {
         supportRequiredPct = _supportRequiredPct;
         minAcceptQuorumPct = _minAcceptQuorumPct;
         voteTime = _voteTime;
-        slashingCost = _slashingCost;
+        voterSlashingCost = _voterSlashingCost;
+        relayerSlashingCost = _relayerSlashingCost;
     }
 
     /**
@@ -193,6 +219,25 @@ contract Voting is IForwarder, AragonApp {
         _submitBatch(_voteId, _yeas, _nays, _proof);
     }
 
+//    /**
+//    * @notice Vote `_supports ? 'yes' : 'no'` in vote #`_voteId`
+//    * @dev Initialization check is implicitly provided by `voteExists()` as new votes can only be created via `newVote(),` which requires initialization
+//    * @param _voteId Id for vote
+//    * @param _supports Whether voter supports the vote
+//    * @param _stake Voter's stake amount signaling their support
+//    */
+//    function castVote(uint256 _voteId, bool _supports, uint256 _stake) payable external voteExists(_voteId) {
+//        require(canCastVote(_voteId, msg.sender), ERROR_CAN_NOT_CAST_VOTE);
+//        require(msg.value == voterSlashingCost, ERROR_INVALID_COLLATERAL_AMOUNT);
+//        _castVote(_voteId, _supports, _stake, msg.sender);
+//    }
+//
+//    function claimCastedVoteCollateral(uint256 _voteId) external voteExists(_voteId) {
+//        CastedVote storage castedVote_ = votes[_voteId].castedVotes[msg.sender];
+//        require(_withinChallengeWindow(castedVote_) || !castedVote_.valid, ERROR_CAN_NOT_CLAIM_COLLATERAL);
+//        require(msg.sender.send(voterSlashingCost), ERROR_COLLATERAL_RETURN_FAILED);
+//    }
+
     /**
     * @notice Challenge batch for invalid aggregation
     */
@@ -200,7 +245,7 @@ contract Voting is IForwarder, AragonApp {
         Batch storage batch_ = votes[_voteId].batches[_batchId];
 
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
-        require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+        require(_withinChallengeWindow(batch_), ERROR_OUT_OF_CHALLENGE_PERIOD);
 
         (bool invalidVote, uint256 voteIndex, bool invalidAggregation) = _isInvalidAggregation(_voteId, _batchId, _proof);
 
@@ -217,14 +262,14 @@ contract Voting is IForwarder, AragonApp {
     }
 
     /**
-    * @notice Challenge batch for invalid vote
+    * @notice Challenge batch for invalid vote stake
     */
     function challengeVoteStake(uint256 _voteId, uint256 _batchId, bytes _proof, uint256 _voteIndex, bytes _storageProof) external batchExists(_voteId, _batchId) {
         Batch storage batch_ = votes[_voteId].batches[_batchId];
 
         require(_proof.equal(batch_.proofHash), ERROR_CHALLENGE_REJECTED);
         require(_proof.isValidIndex(_voteIndex), ERROR_CHALLENGE_REJECTED);
-        require(_withinChallengeWindow(batch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+        require(_withinChallengeWindow(batch_), ERROR_OUT_OF_CHALLENGE_PERIOD);
 
         if (_isInvalidVote(_voteId, _proof, _voteIndex)) {
             emit InvalidVote(_voteId, _batchId, _proof, _voteIndex);
@@ -238,8 +283,23 @@ contract Voting is IForwarder, AragonApp {
         revert(ERROR_CHALLENGE_REJECTED);
     }
 
+//    /**
+//    * @notice Challenge casted vote for invalid stake
+//    */
+//    function challengeCastedVoteStake(uint256 _voteId, address _voter, bytes _storageProof) external castedVoteExists(_voteId, _voter) {
+//        CastedVote storage castedVote_ = votes[_voteId].castedVotes[_voter];
+//        require(_withinChallengeWindow(castedVote_), ERROR_OUT_OF_CHALLENGE_PERIOD);
+//
+//        if (_isInvalidStake(_voteId, _voter, _storageProof)) {
+//            emit InvalidCastedVoteStake(_voteId, _voter, _storageProof);
+//            return _rollbackCastedVoteAndPayOutReward(_voteId, _voter, msg.sender);
+//        }
+//
+//        revert(ERROR_CHALLENGE_REJECTED);
+//    }
+
     /**
-    * @notice Challenge batch for votes duplication
+    * @notice Challenge batch for duplicated votes
     */
     function challengeDuplication(uint256 _voteId, uint256 _previousBatchId, uint256 _currentBatchId, uint256 _previousVoteIndex, uint256 _currentVoteIndex, bytes _previousProof, bytes _currentProof) external batchExists(_voteId, _previousBatchId) batchExists(_voteId, _currentBatchId) {
         Batch storage currentBatch_ = votes[_voteId].batches[_currentBatchId];
@@ -247,7 +307,7 @@ contract Voting is IForwarder, AragonApp {
         require(_previousBatchId != _currentBatchId, ERROR_CHALLENGE_REJECTED);
         require(_currentProof.equal(currentBatch_.proofHash), ERROR_CHALLENGE_REJECTED);
         require(_currentProof.isValidIndex(_currentVoteIndex), ERROR_CHALLENGE_REJECTED);
-        require(_withinChallengeWindow(currentBatch_), ERROR_OUT_OF_BATCH_CHALLENGE_PERIOD);
+        require(_withinChallengeWindow(currentBatch_), ERROR_OUT_OF_CHALLENGE_PERIOD);
 
         // must rollback on an invalid previous vote, cannot perform any checks with it :/
         require(_canVerifyBatch(_voteId, _previousBatchId, _previousProof, _previousVoteIndex), ERROR_CHALLENGE_REJECTED);
@@ -300,9 +360,13 @@ contract Voting is IForwarder, AragonApp {
     function canSubmit(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
         bool isOpen = _isVoteOpen(_voteId);
-        bool hasEnoughBalanceToPayChallenges = collateralToken.balanceOf(this) >= slashingCost.mul(vote_.batchesLength.add(1));
+        bool hasEnoughBalanceToPayChallenges = collateralToken.balanceOf(this) >= relayerSlashingCost.mul(vote_.batchesLength.add(1));
         return isOpen && hasEnoughBalanceToPayChallenges;
     }
+
+//    function canCastVote(uint256 _voteId, address _voter) public view voteExists(_voteId) returns (bool) {
+//        return _isVoteOpen(_voteId) && !_existsCastedVote(_voteId, _voter);
+//    }
 
     function canExecute(uint256 _voteId) public view voteExists(_voteId) returns (bool) {
         Vote storage vote_ = votes[_voteId];
@@ -391,6 +455,25 @@ contract Voting is IForwarder, AragonApp {
         timestamp = batch_.timestamp;
     }
 
+    function getCastedVote(uint256 _voteId, address _voter)
+        public
+        view
+        castedVoteExists(_voteId, _voter)
+        returns (
+            bool valid,
+            bool supports,
+            uint256 stake,
+            uint256 timestamp
+        )
+    {
+        Vote storage vote_ = votes[_voteId];
+        CastedVote storage castedVote_ = vote_.castedVotes[_voter];
+        valid = castedVote_.valid;
+        supports = castedVote_.supports;
+        stake = castedVote_.stake;
+        timestamp = castedVote_.timestamp;
+    }
+
     function _newVote(bytes memory _executionScript, string _metadata, uint64 _blockNumber, bytes memory _storageProof) internal returns (uint256 voteId) {
         uint64 blocksDifference = (getBlockNumber64() - 1).sub(_blockNumber); // avoid double voting in this very block
         require(blocksDifference <= NEW_VOTE_MAX_BLOCKS_ANTIQUITY, ERROR_BLOCK_NUMBER_NOT_ALLOWED);
@@ -428,6 +511,24 @@ contract Voting is IForwarder, AragonApp {
         emit SubmitBatch(_voteId, _batchId, _proof, _yea, _nay);
     }
 
+//    function _castVote(uint256 _voteId, bool _supports, uint256 _stake, address _voter) internal {
+//        Vote storage vote_ = votes[_voteId];
+//        CastedVote storage castedVote_ = vote_.castedVotes[_voter];
+//
+//        castedVote_.valid = true;
+//        castedVote_.stake = _stake;
+//        castedVote_.supports = _supports;
+//        castedVote_.timestamp = getTimestamp();
+//
+//        if (_supports) {
+//            vote_.yea = vote_.yea.add(_stake);
+//        } else {
+//            vote_.nay = vote_.nay.add(_stake);
+//        }
+//
+//        emit CastVote(_voteId, _voter, _supports, _stake, castedVote_.timestamp);
+//    }
+
     function _executeVote(uint256 _voteId) internal {
         Vote storage vote_ = votes[_voteId];
 
@@ -458,7 +559,11 @@ contract Voting is IForwarder, AragonApp {
     }
 
     function _withinChallengeWindow(Batch storage batch_) internal view returns (bool) {
-        return batch_.timestamp + CHALLENGE_WINDOW >= getTimestamp();
+        return batch_.timestamp + RELAYER_CHALLENGE_WINDOW >= getTimestamp();
+    }
+
+    function _withinChallengeWindow(CastedVote storage castedVote_) internal view returns (bool) {
+        return castedVote_.timestamp + VOTER_CHALLENGE_WINDOW >= getTimestamp();
     }
 
     function _existsVote(uint256 _voteId) internal view returns (bool) {
@@ -471,14 +576,34 @@ contract Voting is IForwarder, AragonApp {
         return _batchId < vote_.batchesLength;
     }
 
-    function _rollbackBatchAndPayOutReward(uint256 _voteId, uint256 _batchId, address rewarded) internal {
+    function _existsCastedVote(uint256 _voteId, address _voter) internal view returns (bool) {
+        Vote storage vote_ = votes[_voteId];
+        CastedVote storage castedVote_ = vote_.castedVotes[_voter];
+        return castedVote_.timestamp != uint256(0);
+    }
+
+    function _rollbackBatchAndPayOutReward(uint256 _voteId, uint256 _batchId, address _rewarded) internal {
         Vote storage vote_ = votes[_voteId];
         Batch storage batch_ = vote_.batches[_batchId];
 
         batch_.valid = false;
         vote_.yea = vote_.yea.sub(batch_.yea);
         vote_.nay = vote_.nay.sub(batch_.nay);
-        require(collateralToken.transfer(rewarded, slashingCost));
+        require(collateralToken.transfer(_rewarded, relayerSlashingCost), ERROR_CHALLENGER_PAYOUT_FAILED);
+    }
+
+    function _rollbackCastedVoteAndPayOutReward(uint256 _voteId, address _voter, address _rewarded) internal {
+        Vote storage vote_ = votes[_voteId];
+        CastedVote storage castedVote_ = vote_.castedVotes[_voter];
+
+        castedVote_.valid = false;
+        if (castedVote_.supports) {
+            vote_.yea = vote_.yea.sub(castedVote_.stake);
+        } else {
+            vote_.nay = vote_.nay.sub(castedVote_.stake);
+        }
+
+        require(_rewarded.send(voterSlashingCost), ERROR_CHALLENGER_PAYOUT_FAILED);
     }
 
     /**
@@ -500,6 +625,17 @@ contract Voting is IForwarder, AragonApp {
         address voter = vote.voter();
         uint256 voterBalance = tokenStorageProofs.getBalance(address(token), voter, votes[_voteId].snapshotBlock, _storageProof, tokenType, tokenBalancesSlot);
         return voterBalance != vote.stake();
+    }
+
+    /**
+    * @dev Checks whether a casted vote stake was valid or not
+    * @return true if the given casted vote stake was incorrect
+    */
+    function _isInvalidStake(uint256 _voteId, address _voter, bytes _storageProof) internal view returns (bool) {
+        Vote storage vote_ = votes[_voteId];
+        CastedVote storage castedVote_ = vote_.castedVotes[_voter];
+        uint256 voterStake = tokenStorageProofs.getBalance(address(token), _voter, vote_.snapshotBlock, _storageProof, tokenType, tokenBalancesSlot);
+        return voterStake != castedVote_.stake;
     }
 
     /**
