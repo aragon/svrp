@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "main": "index.js",
   "scripts": {
-    "compile": "truffle compile",
+    "compile": "docker pull ethereum/solc:0.4.24 && npx truffle compile",
     "build": "cd app && npm run build",
     "deploy:rpc": "truffle exec scripts/deploy.js --network rpc",
     "deploy:rinkeby": "truffle exec scripts/deploy.js --network rinkeby",
